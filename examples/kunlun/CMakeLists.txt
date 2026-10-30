@@ -30,3 +30,6 @@ if(NOT TARGET KunlunK200::kunlunk200)
 endif()
 add_executable(kunlun-swiglu-numerics swiglu-numerics.cpp)
 target_link_libraries(kunlun-swiglu-numerics PRIVATE ggml ggml-base KunlunK200::kunlunk200)
+
+add_executable(kunlun-q6-policy-test q6-policy-test.cpp)
+target_link_libraries(kunlun-q6-policy-test PRIVATE ggml ggml-base)

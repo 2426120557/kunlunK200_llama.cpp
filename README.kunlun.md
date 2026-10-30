@@ -31,3 +31,7 @@ See [fixed-token PPL, logits, tasks and query boundaries](docs/backend/kunlun-qu
 ## Requested SwiGLU default update (2026-10-30)
 
 GGML_KUNLUN_SWIGLU unset now means 1: supported PP/TG GLU uses XPU. Explicit 0 restores CPU, pp remains multi-row-only, and invalid values disable it. Existing type/shape/stride/PD/alias guards remain. KUNLUN_LARGE_PP stays unset=0. CPU/XPU logits and generation may differ; the previous quality reports are historical evidence, including the 7B PPL interaction. This change follows the user request and does not claim universal quality equivalence.
+
+## Q6_K output SDNN opt-in
+
+KUNLUN_Q6_K_SDNN=1 uses a lossless W8/K16-scale pack and SDNN for the validated Q6_K output shapes. Unset or 0 retains CPU. Current TG regresses slightly, so this remains experimental. See [contracts and limitations](ggml/src/ggml-kunlun/Q6_K_SDNN.md). SwiGLU remains enabled by default; Large PP remains opt-in.

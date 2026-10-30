@@ -76,7 +76,8 @@ struct tensor_parts {
     void * ptr[2] = {};
     size_t bytes[2] = {}, physical[2] = {};
     int rows[2] = {}, k = 0;
-    bool packed = false, native = false, common = false;
+    bool packed = false, native = false, common = false, q6 = false;
+    std::unique_ptr<kunlun::Q6KWeight> q6_weight[2];
     std::unique_ptr<kunlun::CommonQ4Weight> common_weight[2];
     std::vector<char> original;
 };
@@ -113,6 +114,8 @@ struct backend_context {
     size_t glu_calls=0, glu_elements=0;
     std::map<std::string,size_t> glu_phases;
     std::map<int,size_t> glu_rows;
+    kunlun::Q6KWorkspace q6[2];
+    size_t q6_calls[2]={};
     kunlun::NativeQ4Workspace native[2];
     kunlun::CommonQ4Workspace common[2];
     size_t i8_mm[2] = {}, q4_mm[2] = {};
@@ -137,6 +140,8 @@ buffer_context * buffer_of(const ggml_tensor * t) {
     auto * buf = t->view_src ? t->view_src->buffer : t->buffer;
     return buf && is_ours(buf->buft) ? (buffer_context *)buf->context : nullptr;
 }
+bool q6_enabled(){const char*s=std::getenv("KUNLUN_Q6_K_SDNN");return s&&!std::strcmp(s,"1");}
+bool use_q6(const ggml_tensor*t){return q6_enabled()&&t->type==GGML_TYPE_Q6_K&&!t->view_src&&ggml_is_matrix(t)&&ggml_is_contiguous(t)&&(t->ne[0]==2048||t->ne[0]==4096)&&t->ne[1]==32000;}
 bool use_common(const ggml_tensor * t) {
     return common_enabled() && t->type==GGML_TYPE_Q4_0 && ggml_is_matrix(t) && ggml_is_contiguous(t) && !t->view_src &&
         t->ne[0]%32==0 && t->ne[0]<=INT_MAX && t->ne[1]<=INT_MAX && kunlun::common_q4_supported(t->ne[0],t->ne[1]);
@@ -158,9 +163,13 @@ float * scales(tensor_parts * p, int id) { return kunlun::packed_i8_scales(p->pt
 float * maxima(tensor_parts * p, int id) { return kunlun::packed_i8_maxima(p->ptr[id],p->k,p->rows[id]); }
 
 void repack(tensor_parts * p, size_t first, size_t last) {
-    size_t row_bytes=ggml_row_size(GGML_TYPE_Q4_0,p->k), start=0;
+    size_t row_bytes=ggml_row_size(p->q6?GGML_TYPE_Q6_K:GGML_TYPE_Q4_0,p->k), start=0;
     for (int id=0;id<2;++id) {
         size_t lo=std::max(first,start), hi=std::min(last,start+p->rows[id]);
+        if (p->q6) {
+            if(hi>lo){auto&w=*p->q6_weight[id];w.upload(p->original.data()+start*row_bytes,p->bytes[id]);auto st=w.statistics();std::fprintf(stderr,"KUNLUN Q6 SDNN upload PD%d: K=%d N=%d payload=%zu pack_ms=%.3f upload_ms=%.3f uploads=%zu\n",id,p->k,p->rows[id],p->physical[id],st.pack_ms,st.upload_ms,st.uploads);}
+            start+=p->rows[id];continue;
+        }
         if (p->common) {
             if (hi > lo) {
                 auto & w=*p->common_weight[id];auto before=w.statistics();
@@ -199,14 +208,14 @@ void transfer(ggml_backend_buffer_t buf, const ggml_tensor * t, void * data, siz
     auto * ctx = (buffer_context *)buf->context;
     const ggml_tensor * root = t;
     while (root->view_src) root=root->view_src;
-    auto * packed = root->type == GGML_TYPE_Q4_0 ? (tensor_parts *)root->extra : nullptr;
-    if (packed && (packed->packed || packed->native || packed->common)) {
+    auto * packed = (root->type == GGML_TYPE_Q4_0 || root->type == GGML_TYPE_Q6_K) ? (tensor_parts *)root->extra : nullptr;
+    if (packed && (packed->packed || packed->native || packed->common || packed->q6)) {
         GGML_ASSERT((uintptr_t)t->data >= (uintptr_t)root->data);
         size_t start = (uintptr_t)t->data - (uintptr_t)root->data + off;
         GGML_ASSERT(start <= packed->original.size() && size <= packed->original.size()-start);
         if (put && size) {
             std::memcpy(packed->original.data()+start,data,size);
-            size_t row_bytes = ggml_row_size(GGML_TYPE_Q4_0,packed->k);
+            size_t row_bytes = ggml_row_size(packed->q6?GGML_TYPE_Q6_K:GGML_TYPE_Q4_0,packed->k);
             repack(packed,start/row_bytes,(start+size+row_bytes-1)/row_bytes);
         } else if (!put) std::memcpy(data,packed->original.data()+start,size);
         return;
@@ -256,6 +265,12 @@ ggml_backend_buffer_t alloc_buffer(ggml_backend_buffer_type_t bt, size_t size) {
 #include "q4-activation-share.inc"
 
 void launch_mv(backend_context * ctx, int id, void * y, const void * w, const void * x, int k, int n, int batch, int type, tensor_parts * packed = nullptr) {
+    if(packed&&packed->q6){
+        GGML_ASSERT(type==4&&packed->q6_weight[id]&&packed->q6_weight[id]->data()==w);
+        kunlun::q6_k_matmul(ctx->q6[id],id,y,*packed->q6_weight[id],x,batch);
+        if(!ctx->q6_calls[id]++)std::fprintf(stderr,"KUNLUN Q6 SDNN dispatch PD%d: K=%d N=%d M=%d W8/K16 A8/chunk256 CPU-readback=0\n",id,k,n,batch);
+        return;
+    }
     if (packed && packed->common) {
         GGML_ASSERT(packed->common_weight[id] && packed->common_weight[id]->data()==w);
         auto info=packed->common_weight[id]->info();
@@ -301,7 +316,7 @@ void launch_mv(backend_context * ctx, int id, void * y, const void * w, const vo
         i8 ? scales(packed,id) : nullptr,i8 ? maxima(packed,id) : nullptr,
         std::getenv("GGML_KUNLUN_BASELINE") ? 1 : 16);
 }
-int kernel_type(enum ggml_type t) { return t == GGML_TYPE_Q4_0 ? 2 : t == GGML_TYPE_F16 ? 1 : 0; }
+int kernel_type(enum ggml_type t) { return t == GGML_TYPE_Q6_K ? 4 : t == GGML_TYPE_Q4_0 ? 2 : t == GGML_TYPE_F16 ? 1 : 0; }
 
 void matmul(backend_context * ctx, ggml_tensor * dst) {
     ActivationMatmulScope activation_scope(ctx,dst);
@@ -606,7 +621,7 @@ bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
     if (t->op == GGML_OP_MUL_MAT) {
         return b && ggml_is_contiguous(b) && ggml_is_matrix(a) && ggml_is_matrix(b) && ggml_is_matrix(t) &&
             a->ne[0]==b->ne[0] && t->ne[0]==a->ne[1] && t->ne[1]==b->ne[1] &&
-            (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_F16 || a->type == GGML_TYPE_F32) &&
+            (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_F16 || a->type == GGML_TYPE_F32 || (use_q6(a)&&b->ne[1]<=512)) &&
             a->ne[0] > 0 && a->ne[0] % 32 == 0 && a->ne[0] <= 16384 && a->ne[1] > 0 && a->ne[1] <= INT_MAX && b->ne[1] > 0 &&
             b->ne[1] <= INT_MAX / std::max<int64_t>(a->ne[1], 1) && b->type == GGML_TYPE_F32 && t->type == GGML_TYPE_F32 && !a->view_src &&
             ggml_nbytes(a) <= INT_MAX && ggml_nbytes(b) <= INT_MAX && ggml_nbytes(t) <= INT_MAX;
@@ -644,6 +659,7 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
         auto stats=kunlun::statistics();
         GGML_LOG_INFO("KUNLUN stats: pd0_mm=%zu pd1_mm=%zu split_mm=%zu p2p_copies=%zu p2p_bytes=%zu\n",stats.matmuls[0],stats.matmuls[1],split_matmuls.load(),stats.peer_copies,stats.peer_bytes);
         for (int id=0;id<2;++id) {
+            if(c->q6_calls[id]) {auto qs=c->q6[id].statistics();std::fprintf(stderr,"KUNLUN Q6 SDNN totals PD%d: calls=%zu workspace=%zu quant_launches=%zu sd_launches=%zu join_launches=%zu\n",id,c->q6_calls[id],qs.workspace_bytes,qs.calls,qs.calls,qs.calls);}
             auto mac=c->common[id].mac_statistics();
             if(mac.baseline_sd_calls || mac.stream_sd_calls)std::fprintf(stderr,
                 "KUNLUN common MAC PD%d: owner=%d baseline=%zu stream=%zu shape_fallback=%zu resident_l1d=%zu\n",
@@ -767,6 +783,7 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
         type_iface.get_max_size = [](ggml_backend_buffer_type_t) -> size_t { return 1ULL << 30; };
         type_iface.get_alloc_size = [](ggml_backend_buffer_type_t b, const ggml_tensor * t) {
             if (((type_context *)b->context)->split) return ggml_nbytes(t);
+            if (use_q6(t)) return kunlun::q6_k_size(t->ne[0],t->ne[1]);
             if (use_common(t)) return kunlun::common_q4_size(t->ne[0],t->ne[1]);
             if (use_native(t)) return kunlun::native_q4_size(t->ne[0],t->ne[1]);
             return use_i8(t) ? packed_size(t->ne[0],t->ne[1]) : ggml_nbytes(t);
@@ -785,20 +802,21 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
                     t->name,(long long)t->ne[0],(long long)t->ne[1],use_i8(t)?"CDNN":"existing Q4");
             if (common_enabled() && t->type==GGML_TYPE_Q4_0 && !use_common(t))
                 std::fprintf(stderr,"KUNLUN common storage fallback: tensor=%s K=%lld N=%lld reason=type/shape/stride/view method=%s\n",t->name,(long long)t->ne[0],(long long)t->ne[1],use_native(t)?"legacy native":use_i8(t)?"CDNN":"original Q4");
-            if (!c->type->split && !use_i8(t) && !use_native(t) && !use_common(t)) return GGML_STATUS_SUCCESS;
+            if (!c->type->split && !use_i8(t) && !use_native(t) && !use_common(t) && !use_q6(t)) return GGML_STATUS_SUCCESS;
             std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
             auto p = std::unique_ptr<tensor_parts>(new tensor_parts{});
             GGML_ASSERT(ggml_is_matrix(t));
-            p->packed=use_i8(t); p->native=use_native(t);p->common=use_common(t); p->k=t->ne[0];
-            if (p->packed || p->native || p->common) p->original.resize(ggml_nbytes(t));
-            if (c->type->split) { p->rows[0] = t->ne[1] * c->type->fraction; p->rows[1] = t->ne[1] - p->rows[0]; }
+            p->packed=use_i8(t); p->native=use_native(t);p->common=use_common(t);p->q6=use_q6(t); p->k=t->ne[0];
+            if (p->packed || p->native || p->common || p->q6) p->original.resize(ggml_nbytes(t));
+            if (c->type->split) { p->rows[0] = t->ne[1] * c->type->fraction; if(p->q6)p->rows[0]=p->rows[0]/32*32; p->rows[1] = t->ne[1] - p->rows[0]; }
             else p->rows[c->type->id]=t->ne[1];
             for (int d=0;d<2;++d) {
                 p->bytes[d] = (size_t)p->rows[d]*ggml_row_size(t->type,t->ne[0]);
-                p->physical[d] = p->common ? kunlun::common_q4_size(p->k,p->rows[d]) : p->native ? kunlun::native_q4_size(p->k,p->rows[d]) : p->packed ? packed_size(p->k,p->rows[d]) : p->bytes[d];
+                p->physical[d] = p->q6 ? kunlun::q6_k_size(p->k,p->rows[d]) : p->common ? kunlun::common_q4_size(p->k,p->rows[d]) : p->native ? kunlun::native_q4_size(p->k,p->rows[d]) : p->packed ? packed_size(p->k,p->rows[d]) : p->bytes[d];
                 if (p->bytes[d]) {
                     p->ptr[d] = c->type->split ? allocate(d,p->physical[d]) : t->data;
-                    if (!p->ptr[d]) { for(int j=0;j<d;++j) { p->common_weight[j].reset();release(j,p->ptr[j],p->physical[j]); } return GGML_STATUS_ALLOC_FAILED; }
+                    if (!p->ptr[d]) { for(int j=0;j<d;++j) { p->q6_weight[j].reset();p->common_weight[j].reset();release(j,p->ptr[j],p->physical[j]); } return GGML_STATUS_ALLOC_FAILED; }
+                    if(p->q6)p->q6_weight[d].reset(new kunlun::Q6KWeight(d,p->k,p->rows[d],p->ptr[d],p->physical[d]));
                     if (p->common) {
                         p->common_weight[d].reset(new kunlun::CommonQ4Weight(d,p->k,p->rows[d],p->ptr[d],p->physical[d]));
                         ++common_regions[d];common_region_bytes[d]+=p->physical[d];
@@ -811,7 +829,7 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
             std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
             auto * c = (buffer_context *)b->context;
             if (c->type->split) {
-                for (auto & p : c->tensors) for (int d=0;d<2;++d) { p->common_weight[d].reset();release(d,p->ptr[d],p->physical[d]); }
+                for (auto & p : c->tensors) for (int d=0;d<2;++d) { p->q6_weight[d].reset();p->common_weight[d].reset();release(d,p->ptr[d],p->physical[d]); }
                 munmap(c->base,std::max<size_t>(c->size,1));
             } else { c->tensors.clear();release(c->type->id,c->base,c->size); }
             delete c;
@@ -824,14 +842,14 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
             auto * c = (buffer_context *)b->context;
             if (c->type->split) {
                 for (auto & p : c->tensors) {
-                    if (p->packed || p->native || p->common) { std::fill(p->original.begin(),p->original.end(),v); repack(p.get(),0,p->rows[0]+p->rows[1]); }
+                    if (p->packed || p->native || p->common || p->q6) { std::fill(p->original.begin(),p->original.end(),v); repack(p.get(),0,p->rows[0]+p->rows[1]); }
                     else for (int d=0;d<2;++d) clear_device(d,p->ptr[d],p->physical[d],v);
                 }
                 return;
             }
             clear_device(c->type->id,c->base,c->size,v);
             if(v==0)kunlun::kv_max_zero(c->type->id,c->base,c->size);
-            for (auto & p : c->tensors) if (p->packed || p->native || p->common) { std::fill(p->original.begin(),p->original.end(),v); repack(p.get(),0,p->rows[0]+p->rows[1]); }
+            for (auto & p : c->tensors) if (p->packed || p->native || p->common || p->q6) { std::fill(p->original.begin(),p->original.end(),v); repack(p.get(),0,p->rows[0]+p->rows[1]); }
         };
         buffer_iface.cpy_tensor = [](ggml_backend_buffer_t b, const ggml_tensor * src, ggml_tensor * dst) {
             auto * s = buffer_of(src); auto * d = (buffer_context *)b->context;
@@ -839,7 +857,7 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
             const auto * sr = src; const auto * dr = dst;
             while (sr->view_src) sr=sr->view_src;
             while (dr->view_src) dr=dr->view_src;
-            if ((sr->type == GGML_TYPE_Q4_0 && sr->extra) || (dr->type == GGML_TYPE_Q4_0 && dr->extra)) return false;
+            if (((sr->type == GGML_TYPE_Q4_0 || sr->type == GGML_TYPE_Q6_K) && sr->extra) || ((dr->type == GGML_TYPE_Q4_0 || dr->type == GGML_TYPE_Q6_K) && dr->extra)) return false;
             std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
             if(s->type->id == d->type->id) { select(d->type->id); check(kunlun::copy(dst->data,src->data,ggml_nbytes(src),kunlun::device_to_device)); check(kunlun::wait()); }
             else peer(d->type->id,dst->data,s->type->id,src->data,ggml_nbytes(src));
