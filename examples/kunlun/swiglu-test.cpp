@@ -58,6 +58,7 @@ int main(int argc,char **argv) {
     auto *bf=ggml_new_tensor_2d(ctx,GGML_TYPE_BF16,256,8);GGML_ASSERT(!ggml_backend_dev_supports_op(gpu,ggml_swiglu_split(ctx,bf,bf)));
     auto *nd=ggml_new_tensor_3d(ctx,GGML_TYPE_F32,256,2,2);auto *ny=ggml_swiglu_split(ctx,nd,nd);
     GGML_ASSERT(ggml_backend_dev_supports_op(gpu,ny));nd->nb[2]+=4;GGML_ASSERT(!ggml_backend_dev_supports_op(gpu,ny));
+    unsetenv("GGML_KUNLUN_SWIGLU");GGML_ASSERT(ggml_backend_dev_supports_op(gpu,y));
     setenv("GGML_KUNLUN_SWIGLU","pp",1);GGML_ASSERT(ggml_backend_dev_supports_op(gpu,y));
     auto *single=ggml_new_tensor_2d(ctx,GGML_TYPE_F32,256,1);
     GGML_ASSERT(!ggml_backend_dev_supports_op(gpu,ggml_swiglu_split(ctx,single,single)));

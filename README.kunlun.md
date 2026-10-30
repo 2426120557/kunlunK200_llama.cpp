@@ -27,3 +27,7 @@ See [selection, shape guards and disabling options](ggml/src/ggml-kunlun/DEFAULT
 ## 0.7.12 model-quality assessment
 
 See [fixed-token PPL, logits, tasks and query boundaries](docs/backend/kunlun-quality-20261030.md). SwiGLU and Large PP remain opt-in; small greedy differences alone are not treated as a quality failure. Their independent quality limits and evaluation scope are documented. [Evaluator usage](examples/kunlun/QUALITY.md).
+
+## Requested SwiGLU default update (2026-10-30)
+
+GGML_KUNLUN_SWIGLU unset now means 1: supported PP/TG GLU uses XPU. Explicit 0 restores CPU, pp remains multi-row-only, and invalid values disable it. Existing type/shape/stride/PD/alias guards remain. KUNLUN_LARGE_PP stays unset=0. CPU/XPU logits and generation may differ; the previous quality reports are historical evidence, including the 7B PPL interaction. This change follows the user request and does not claim universal quality equivalence.

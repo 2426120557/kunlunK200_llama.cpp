@@ -42,3 +42,7 @@ unset GGML_KUNLUN_Q4_ACT_SHARE KUNLUN_Q4_MAC_DMA KUNLUN_Q4_NMAJOR KUNLUN_Q4_GEMM
 ~~~
 
 The new system-library backend requires 0.7.12, preventing a new backend from silently using old opt-in library defaults. Bundled builds use the pinned submodule. CPU-only, CDNN and direct/legacy Q4 settings keep their existing precedence and behavior.
+
+## Requested SwiGLU default update (2026-10-30)
+
+GGML_KUNLUN_SWIGLU unset now means 1: supported PP/TG GLU uses XPU. Explicit 0 restores CPU, pp remains multi-row-only, and invalid values disable it. Existing type/shape/stride/PD/alias guards remain. KUNLUN_LARGE_PP stays unset=0. CPU/XPU logits and generation may differ; the previous quality reports are historical evidence, including the 7B PPL interaction. This change follows the user request and does not claim universal quality equivalence.

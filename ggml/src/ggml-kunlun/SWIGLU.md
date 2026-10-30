@@ -2,7 +2,7 @@
 
 KunlunK200 0.5.0 is required by both bundled and system-library builds.
 
-`GGML_KUNLUN_SWIGLU=1` opts into plain `GGML_OP_GLU/GGML_GLU_OP_SWIGLU`. The default and `=0` keep CPU GLU. `GGML_KUNLUN_SWIGLU=pp` uses the GPU only for multiple rows; one-row operations keep CPU GLU, including any pruned PP operation. This can retain PP transfer savings while avoiding small-shape TG regressions. Invalid values disable the feature and are logged. Set the mode before context creation and keep it fixed for that context. This setting is independent of the existing common/native/CDNN Q4 settings and does not change their priority or weight ABI.
+`GGML_KUNLUN_SWIGLU=1` opts into plain `GGML_OP_GLU/GGML_GLU_OP_SWIGLU`. Unset enables supported XPU GLU; explicit 0 keeps CPU GLU. `GGML_KUNLUN_SWIGLU=pp` uses the GPU only for multiple rows; one-row operations keep CPU GLU, including any pruned PP operation. This can retain PP transfer savings while avoiding small-shape TG regressions. Invalid values disable the feature and are logged. Set the mode before context creation and keep it fixed for that context. This setting is independent of the existing common/native/CDNN Q4 settings and does not change their priority or weight ABI.
 
 Supported inputs are matching F32 or F16 tensors with contiguous inner elements and flattenable outer rows. Separate gate/up, packed input, packed swapped input and padded rows are supported. The output has the same type. Views are accepted only when their shape/strides satisfy the library contract. GEGLU, ReGLU, clamped/OAI variants, BF16, noncontiguous inner elements, incompatible outer strides and split-buffer inputs retain CPU placement. The output and both activation inputs must be normal device buffers on the executing PD. Row Split uses the existing gathered owning-PD activations; Layer Split runs GLU on each layer's PD.
 
@@ -28,3 +28,7 @@ Diagnostic-only harness options: `K200_CAPTURE_GLU=<existing-dir>` with `K200_TR
 ## 0.7.12 reevaluation
 
 The CPU default is retained. With current FlashAttention and other common-Q4 optimizations, XPU SwiGLU improves the measured PP/TG workloads, but scalar/SIMD rounding and A8 threshold sensitivity still prevent bitwise model equivalence. See the 2026-10-30 defaults report; this does not change the supported types/layouts or 0/1/pp semantics.
+
+## Requested SwiGLU default update (2026-10-30)
+
+GGML_KUNLUN_SWIGLU unset now means 1: supported PP/TG GLU uses XPU. Explicit 0 restores CPU, pp remains multi-row-only, and invalid values disable it. Existing type/shape/stride/PD/alias guards remain. KUNLUN_LARGE_PP stays unset=0. CPU/XPU logits and generation may differ; the previous quality reports are historical evidence, including the 7B PPL interaction. This change follows the user request and does not claim universal quality equivalence.

@@ -371,7 +371,7 @@ void matmul(backend_context * ctx, ggml_tensor * dst) {
 
 bool swiglu_enabled() {
     const char *mode=std::getenv("GGML_KUNLUN_SWIGLU");
-    return mode && (!std::strcmp(mode,"1") || !std::strcmp(mode,"pp"));
+    return !mode || !std::strcmp(mode,"1") || !std::strcmp(mode,"pp");
 }
 bool glu_rows_contiguous(const ggml_tensor *t) {
     size_t bytes=ggml_type_size(t->type);
@@ -385,7 +385,7 @@ bool glu_rows_contiguous(const ggml_tensor *t) {
 }
 const char * glu_reason(const ggml_tensor *t) {
     if(!swiglu_enabled())return "disabled";
-    if(!std::strcmp(std::getenv("GGML_KUNLUN_SWIGLU"),"pp") && ggml_nrows(t)==1)return "single-row CPU policy";
+    if(const char *mode=std::getenv("GGML_KUNLUN_SWIGLU"); mode && !std::strcmp(mode,"pp") && ggml_nrows(t)==1)return "single-row CPU policy";
     if(ggml_get_glu_op(t)!=GGML_GLU_OP_SWIGLU)return "GLU variant";
     const auto *a=t->src[0],*b=t->src[1];
     if(!a || (t->type!=GGML_TYPE_F32 && t->type!=GGML_TYPE_F16) || a->type!=t->type || (b && b->type!=t->type))return "type";
@@ -757,7 +757,7 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
                 std::getenv("KUNLUN_Q4_NMAJOR") ? std::getenv("KUNLUN_Q4_NMAJOR") : "auto(default)",
                 std::getenv("KUNLUN_Q4_GEMM_OWNERS") ? std::getenv("KUNLUN_Q4_GEMM_OWNERS") : "auto(default)",
                 std::getenv("KUNLUN_LARGE_PP") ? std::getenv("KUNLUN_LARGE_PP") : "0(default)",
-                glu_setting ? glu_setting : "0(default)");
+                glu_setting ? glu_setting : "1(default)");
         }
         if (common_enabled()) std::fprintf(stderr,"KUNLUN common Q4 opt-in: common ABI v1 > legacy native > requant I8; M>1 Row A8, M=1 two-component A8\n");
         type_iface.get_name = [](ggml_backend_buffer_type_t b) { return ((type_context *)b->context)->name.c_str(); };
