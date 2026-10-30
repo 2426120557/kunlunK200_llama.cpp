@@ -659,7 +659,7 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
         auto stats=kunlun::statistics();
         GGML_LOG_INFO("KUNLUN stats: pd0_mm=%zu pd1_mm=%zu split_mm=%zu p2p_copies=%zu p2p_bytes=%zu\n",stats.matmuls[0],stats.matmuls[1],split_matmuls.load(),stats.peer_copies,stats.peer_bytes);
         for (int id=0;id<2;++id) {
-            if(c->q6_calls[id]) {auto qs=c->q6[id].statistics();std::fprintf(stderr,"KUNLUN Q6 SDNN totals PD%d: calls=%zu workspace=%zu quant_launches=%zu sd_launches=%zu join_launches=%zu\n",id,c->q6_calls[id],qs.workspace_bytes,qs.calls,qs.calls,qs.calls);}
+            if(c->q6_calls[id]) {auto qs=c->q6[id].statistics();std::fprintf(stderr,"KUNLUN Q6 SDNN totals PD%d: calls=%zu workspace=%zu quant_launches=%zu sd_launches=%zu join_launches=%zu onchip_calls=%zu\n",id,c->q6_calls[id],qs.workspace_bytes,qs.calls,qs.calls,c->q6[id].legacy_calls(),qs.calls-c->q6[id].legacy_calls());}
             auto mac=c->common[id].mac_statistics();
             if(mac.baseline_sd_calls || mac.stream_sd_calls)std::fprintf(stderr,
                 "KUNLUN common MAC PD%d: owner=%d baseline=%zu stream=%zu shape_fallback=%zu resident_l1d=%zu\n",

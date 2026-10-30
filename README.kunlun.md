@@ -34,4 +34,4 @@ GGML_KUNLUN_SWIGLU unset now means 1: supported PP/TG GLU uses XPU. Explicit 0 r
 
 ## Q6_K output SDNN opt-in
 
-KUNLUN_Q6_K_SDNN=1 uses a lossless W8/K16-scale pack and SDNN for the validated Q6_K output shapes. Unset or 0 retains CPU. Current TG regresses slightly, so this remains experimental. See [contracts and limitations](ggml/src/ggml-kunlun/Q6_K_SDNN.md). SwiGLU remains enabled by default; Large PP remains opt-in.
+KUNLUN_Q6_K_SDNN=1 uses a lossless W8/K16-scale pack and SDNN for the validated Q6_K output shapes. Unset or 0 retains CPU. EW/L1E aggregation improves TG for the two tested models; this remains experimental. KUNLUN_Q6_K_LEGACY=1 selects the previous HBM-partial implementation. See [on-chip results](docs/backend/kunlun-q6-onchip-20261030.md). See [contracts and limitations](ggml/src/ggml-kunlun/Q6_K_SDNN.md). SwiGLU remains enabled by default; Large PP remains opt-in.
