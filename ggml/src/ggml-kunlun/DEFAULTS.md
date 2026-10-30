@@ -9,7 +9,7 @@ The common-Q4 execution/quantization profile is still opt-in. These defaults do 
 | KUNLUN_Q4_NMAJOR | off | on for validated shapes | Requires stream selection; Kp/Np=4096/4096,4096/11008,11008/4096 |
 | KUNLUN_Q4_GEMM_OWNERS | off | on for validated shapes | Physical M=tileM=128, Kp/Np=4096/4096,4096/11008,11008/4096; original Rows/Combo capacity checks |
 | KUNLUN_LARGE_PP | off | off | Explicit 1 retains 0.7.11 bounded-query Flash, RoPE/CONT placement and KV-writer chunks. Numerical CPU/XPU differences remain quality-sensitive |
-| GGML_KUNLUN_SWIGLU | off | off | Explicit 1 runs supported PP/TG GLU on XPU; pp restricts to multi-row GLU. CPU SIMD / CL exp rounding can cross A8 quantization thresholds |
+| GGML_KUNLUN_SWIGLU | off | on | Explicit 1 runs supported PP/TG GLU on XPU; pp restricts to multi-row GLU. CPU SIMD / CL exp rounding can cross A8 quantization thresholds |
 
 For the four newly automatic options, explicit 0 restores the preceding path, 1 enables selection within exactly the existing guards, and other values disable the feature (with bounded diagnostics). MAC_DMA=0 also prevents N-major selection. GEMM Owners and sharing do not depend on stream selection. No weight repack, ABI, quantizer, accumulation order, fences or kernel changed.
 
