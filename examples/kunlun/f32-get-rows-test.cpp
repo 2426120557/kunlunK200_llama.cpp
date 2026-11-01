@@ -15,7 +15,7 @@ int main(int argc,char **argv) {
         auto *i=ggml_new_tensor_1d(c,GGML_TYPE_I32,m);auto *y=ggml_get_rows(c,x,i);
         GGML_ASSERT(ggml_backend_dev_supports_op(d,y)==(m<=512));
         setenv("GGML_KUNLUN_GET_ROWS_F32","0",1);GGML_ASSERT(!ggml_backend_dev_supports_op(d,y));
-        unsetenv("GGML_KUNLUN_GET_ROWS_F32");GGML_ASSERT(!ggml_backend_dev_supports_op(d,y));
+        unsetenv("GGML_KUNLUN_GET_ROWS_F32");GGML_ASSERT(ggml_backend_dev_supports_op(d,y)==(m<=512));
         setenv("GGML_KUNLUN_GET_ROWS_F32","invalid",1);GGML_ASSERT(!ggml_backend_dev_supports_op(d,y));
         setenv("GGML_KUNLUN_GET_ROWS_F32","1",1);
     }

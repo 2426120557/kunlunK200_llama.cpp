@@ -47,3 +47,7 @@ GGML_KUNLUN_GET_ROWS_F32=1 keeps supported F32 activation row selection on XPU. 
 ## Pure-token input graph opt-in
 
 GGML_KUNLUN_PRUNE_INACTIVE_MIXED=1 omits inactive mixed-input branches in supported Kunlun LLAMA text graphs. Unset or 0 retains the legacy builder. External embeddings and mixed batches keep the original path, with graph reconstruction on input-form or policy changes. Single PD can use one continuous XPU graph. It remains opt-in because PP/TG results vary, including a lower Tiny TG mean. No library/kernel/default changes are included. See [policy](docs/kunlun-prune-mixed/PRUNE_INACTIVE_MIXED.md) and [Japanese evaluation](docs/kunlun-prune-mixed/REPORT.ja.md).
+
+## Current recommended defaults
+
+See [DEFAULTS.md](DEFAULTS.md). Common Q4, new SDNN Q6, Q4/F32 GET_ROWS and pure-token graph specialization are enabled when unset. Large PP remains disabled. Explicit 0 preserves rollback. This table supersedes dated opt-in reports.

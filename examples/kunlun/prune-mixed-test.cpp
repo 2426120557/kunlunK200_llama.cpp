@@ -17,7 +17,7 @@ int main(int argc,char **argv) {
     auto *ctx=llama_init_from_model(model,cp);need(ctx,"context");auto *batch=llama_batch_ext_init(ctx);need(batch,"batch");
     const int k=llama_model_n_embd(model),nv=llama_vocab_n_tokens(llama_model_get_vocab(model));
     auto *file=std::fopen(argv[3],"wb");need(file,"output file");
-    const char *mode=std::getenv("GGML_KUNLUN_PRUNE_INACTIVE_MIXED");const bool enabled=mode&&!std::strcmp(mode,"1");
+    const char *mode=std::getenv("GGML_KUNLUN_PRUNE_INACTIVE_MIXED");const bool enabled=!mode||!std::strcmp(mode,"1");
     int pos=0;std::vector<float>embd(k);std::ifstream raw(argv[1],std::ios::binary);size_t offset=std::strtoull(argv[2],nullptr,10),rowbytes=(size_t)k/32*18;std::vector<unsigned char>row(rowbytes);
     auto embedding=[&](int id){raw.seekg(offset+(size_t)id*rowbytes);raw.read((char*)row.data(),rowbytes);need((size_t)raw.gcount()==rowbytes,"embedding bytes");for(int b=0;b<k/32;++b){uint16_t bits=row[b*18]|row[b*18+1]<<8;_Float16 h;std::memcpy(&h,&bits,2);float d=h;for(int j=0;j<16;++j){int q=row[b*18+2+j];embd[b*32+j]=float((q&15)-8)*d;embd[b*32+j+16]=float((q>>4)-8)*d;}}};
     auto process=[&](const char *label,int kind,int count,int first) {
