@@ -33,3 +33,8 @@ target_link_libraries(kunlun-swiglu-numerics PRIVATE ggml ggml-base KunlunK200::
 
 add_executable(kunlun-q6-policy-test q6-policy-test.cpp)
 target_link_libraries(kunlun-q6-policy-test PRIVATE ggml ggml-base)
+
+add_executable(kunlun-get-rows-inactive-test get-rows-inactive-test.cpp)
+target_link_libraries(kunlun-get-rows-inactive-test PRIVATE ggml ggml-base)
+add_executable(kunlun-get-rows-policy-test get-rows-policy-test.cpp)
+target_link_libraries(kunlun-get-rows-policy-test PRIVATE ggml ggml-base)

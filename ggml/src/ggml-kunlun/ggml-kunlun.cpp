@@ -109,7 +109,9 @@ struct ActivationShare {
 struct backend_context {
     ActivationShare activation;
     int id;
-    kernel mv[2], ew, gather, kv, glu, attention;
+    kernel mv[2], ew, gather, kv, glu, attention, embedding;
+    size_t embedding_calls=0,embedding_tokens=0;
+    std::map<int,size_t> embedding_rows;
     std::map<std::string,size_t> attention_phases,attention_shapes;
     size_t glu_calls=0, glu_elements=0;
     std::map<std::string,size_t> glu_phases;
@@ -565,6 +567,33 @@ void set_rows(backend_context * ctx, ggml_tensor * dst) {
     if (!ok) GGML_ABORT("SET_ROWS %s device index validation failed on PD%d",dst->name,ctx->id);
 }
 
+bool get_rows_enabled() {
+    const char *mode=std::getenv("GGML_KUNLUN_GET_ROWS");
+    return mode && !std::strcmp(mode,"1");
+}
+bool get_rows_supported(const ggml_tensor *t) {
+    const auto *w=t->src[0],*ids=t->src[1];
+    if(!get_rows_enabled() || !w || !ids || !use_common(w) || w->ne[0]%64 || !ggml_is_matrix(w))return false;
+    // Loader probes have a buffer type but no buffer_context.
+    if(w->buffer) {
+        if(!is_ours(w->buffer->buft))return false;
+        if(((type_context*)w->buffer->buft->context)->split)return false;
+    }
+    return ids->type==GGML_TYPE_I32 && ggml_is_contiguous(ids) && ids->ne[0]>=1 && ids->ne[0]<=512 && ids->ne[1]==1 && ids->ne[2]==1 && ids->ne[3]==1 &&
+        t->type==GGML_TYPE_F32 && ggml_is_contiguous(t) && t->ne[0]==w->ne[0] && t->ne[1]==ids->ne[0] && t->ne[2]==1 && t->ne[3]==1;
+}
+void get_rows_compute(backend_context *ctx,ggml_tensor *t) {
+    const auto *w=t->src[0],*ids=t->src[1];auto *p=(tensor_parts*)w->extra;auto *wb=buffer_of(w);
+    GGML_ASSERT(get_rows_supported(t) && wb && !wb->type->split && wb->type->id==ctx->id && p && p->common && p->common_weight[ctx->id]);
+    auto &weight=*p->common_weight[ctx->id];int rows=ids->ne[0];
+    if(!kunlun::common_q4_get_rows(ctx->embedding,ctx->id,t->data,ggml_nbytes(t),weight,(const int32_t*)ids->data,ggml_nbytes(ids),rows))
+        GGML_ABORT("GET_ROWS %s: invalid token IDs or pointer contract on PD%d",t->name,ctx->id);
+    ++ctx->embedding_calls;ctx->embedding_tokens+=rows;
+    if(!ctx->embedding_rows[rows]++) {
+        auto s=weight.statistics();std::fprintf(stderr,"KUNLUN GET_ROWS PD%d: K=%lld N=%lld M=%d common_ABI=1 weight=%p uploads=%zu upload_bytes=%zu pack_ms=%.3f upload_ms=%.3f\n",ctx->id,(long long)w->ne[0],(long long)w->ne[1],rows,weight.data(),s.uploads,s.upload_bytes,s.pack_ms,s.upload_ms);
+    }
+}
+
 bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
     if (t->op == GGML_OP_NONE || t->op == GGML_OP_VIEW || t->op == GGML_OP_RESHAPE || t->op == GGML_OP_TRANSPOSE || t->op == GGML_OP_PERMUTE) return true;
     const auto * a = t->src[0]; const auto * b = t->src[1];
@@ -575,6 +604,7 @@ bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
         }
     }
     if (!a) return false;
+    if(t->op==GGML_OP_GET_ROWS)return get_rows_supported(t);
     if(t->op==GGML_OP_FLASH_ATTN_EXT){
         kunlun::Flash4Layout p{};const char *reason=flash_parameters(t,p);
         if(*reason && std::getenv("GGML_KUNLUN_DIAGNOSTICS")) {
@@ -683,6 +713,7 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
                 id,s.accelerated,s.fallback,c->i8_mm[id],c->q4_mm[id],s.hbm_workspace_bytes,s.l3_workspace_bytes,
                 native_uploads[id].load(),native_upload_bytes[id].load(),native_upload_ns[id].load()/1e6,kunlun::allocated_bytes(id));
         }
+        if(c->embedding_calls)std::fprintf(stderr,"KUNLUN GET_ROWS totals PD%d: calls=%zu tokens=%zu status_D2H=%zu\n",c->id,c->embedding_calls,c->embedding_tokens,c->embedding_calls*256);
         std::fprintf(stderr,"KUNLUN SwiGLU totals PD%d: calls=%zu elements=%zu\n",c->id,c->glu_calls,c->glu_elements);
         for(const auto &v:c->glu_phases)std::fprintf(stderr,"KUNLUN SwiGLU phase PD%d %s calls=%zu\n",c->id,v.first.c_str(),v.second);
         kunlun::kv_max_log_statistics();
@@ -701,12 +732,14 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
         ActivationGraphScope activation_scope(c,graph);
         for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
             auto * t = ggml_graph_node(graph,i);
+            if(t->op==GGML_OP_GET_ROWS && !(t->flags & GGML_TENSOR_FLAG_COMPUTE))continue;
             if(c->activation.enabled)activation_write(c,t);
             K200_DIAG_SCOPE(node_diag,"xpu.node",ggml_op_name(t->op),t->name);
             kunlun::diagnostic_tensor(t->name,t->ne);
             if(t->op!=GGML_OP_NONE&&t->op!=GGML_OP_VIEW&&t->op!=GGML_OP_RESHAPE&&t->op!=GGML_OP_PERMUTE&&t->op!=GGML_OP_TRANSPOSE&&t->op!=GGML_OP_SET_ROWS)
                 kunlun::kv_max_invalidate(c->id,t->data,ggml_nbytes(t));
-            if(t->op==GGML_OP_FLASH_ATTN_EXT) flash_compute(c,t);
+            if(t->op==GGML_OP_GET_ROWS)get_rows_compute(c,t);
+            else if(t->op==GGML_OP_FLASH_ATTN_EXT) flash_compute(c,t);
             else if(attention_enabled() && (attention_matrix_candidate(t) || t->op==GGML_OP_SOFT_MAX || t->op==GGML_OP_CONT || t->op==GGML_OP_ROPE)) attention_compute(c,t);
             else if (t->op == GGML_OP_MUL_MAT) matmul(c,t);
             else if (t->op == GGML_OP_SET_ROWS) set_rows(c,t);
@@ -873,7 +906,7 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
         di.get_buffer_type = [](ggml_backend_dev_t d) { return &normal_types[((device_context *)d->context)->id]; };
         di.supports_op = supports_op;
         di.supports_buft = [](ggml_backend_dev_t d, ggml_backend_buffer_type_t b) { return is_ours(b) && ((type_context *)b->context)->id == ((device_context *)d->context)->id; };
-        di.offload_op = [](ggml_backend_dev_t d, const ggml_tensor * t) { return supports_op(d,t) && t->op == GGML_OP_MUL_MAT; };
+        di.offload_op = [](ggml_backend_dev_t d, const ggml_tensor * t) { return supports_op(d,t) && (t->op == GGML_OP_MUL_MAT || t->op==GGML_OP_GET_ROWS); };
         reg.api_version=GGML_BACKEND_API_VERSION;
         reg.iface.get_name=[](ggml_backend_reg_t) { return "KUNLUN"; };
         reg.iface.get_device_count=[](ggml_backend_reg_t) -> size_t { int n=0; return kunlun::device_count(&n)==0 ? std::min(n,2) : 0; };

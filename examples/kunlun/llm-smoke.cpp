@@ -40,6 +40,7 @@ struct OpTrace {
 };
 static bool trace_op(ggml_tensor * node,bool ask,void * opaque) {
     auto & trace=*static_cast<OpTrace *>(opaque);
+    if(ask && !(node->flags & GGML_TENSOR_FLAG_COMPUTE))return false;
     if(ask) {
         if(std::getenv("K200_TRACE_LAYOUT") && (node->op==GGML_OP_MUL_MAT || node->op==GGML_OP_SOFT_MAX || node->op==GGML_OP_ROPE || node->op==GGML_OP_CONT || node->op==GGML_OP_GET_ROWS || node->op==GGML_OP_SET_ROWS || node->op==GGML_OP_GLU)) {
             static std::map<std::string,bool> seen;
