@@ -43,3 +43,7 @@ Set GGML_KUNLUN_GET_ROWS=1 together with GGML_KUNLUN_COMMON_Q4=1 to gather suppo
 ## F32 GET_ROWS opt-in
 
 GGML_KUNLUN_GET_ROWS_F32=1 keeps supported F32 activation row selection on XPU. Unset or 0 retains CPU F32 GET_ROWS. It is independent of GGML_KUNLUN_GET_ROWS for Q4 embedding and changes no Q6/SwiGLU/Large PP defaults. Transfers and graph splits decrease; overall PP/TG speedups are not established, so it remains opt-in. See [contracts](ggml/src/ggml-kunlun/GET_ROWS_F32.md) and [evaluation](ggml/src/ggml-kunlun/GET_ROWS_F32_REPORT.ja.md).
+
+## Pure-token input graph opt-in
+
+GGML_KUNLUN_PRUNE_INACTIVE_MIXED=1 omits inactive mixed-input branches in supported Kunlun LLAMA text graphs. Unset or 0 retains the legacy builder. External embeddings and mixed batches keep the original path, with graph reconstruction on input-form or policy changes. Single PD can use one continuous XPU graph. It remains opt-in because PP/TG results vary, including a lower Tiny TG mean. No library/kernel/default changes are included. See [policy](docs/kunlun-prune-mixed/PRUNE_INACTIVE_MIXED.md) and [Japanese evaluation](docs/kunlun-prune-mixed/REPORT.ja.md).
