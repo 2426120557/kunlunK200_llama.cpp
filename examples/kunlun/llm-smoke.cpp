@@ -49,7 +49,7 @@ static bool trace_op(ggml_tensor * node,bool ask,void * opaque) {
                 seen[key]=true;
                 auto log=[](const char *role,const ggml_tensor *t) {
                     if(!t)return;
-                    std::fprintf(stderr,"K200LAYOUT role=%s name=%s op=%s type=%s ne=%lld,%lld,%lld,%lld nb=%zu,%zu,%zu,%zu buffer=%s params=",role,t->name,ggml_op_name(t->op),ggml_type_name(t->type),(long long)t->ne[0],(long long)t->ne[1],(long long)t->ne[2],(long long)t->ne[3],t->nb[0],t->nb[1],t->nb[2],t->nb[3],t->buffer?ggml_backend_buffer_name(t->buffer):"view");
+                    std::fprintf(stderr,"K200LAYOUT role=%s name=%s op=%s type=%s ne=%lld,%lld,%lld,%lld nb=%zu,%zu,%zu,%zu flags=%d buffer=%s params=",role,t->name,ggml_op_name(t->op),ggml_type_name(t->type),(long long)t->ne[0],(long long)t->ne[1],(long long)t->ne[2],(long long)t->ne[3],t->nb[0],t->nb[1],t->nb[2],t->nb[3],(int)t->flags,t->buffer?ggml_backend_buffer_name(t->buffer):"view");
                     for(int i=0;i<8;++i)std::fprintf(stderr,"%s%d",i?",":"",t->op_params[i]);std::fprintf(stderr,"\n");
                 };
                 log("dst",node);for(const auto *v:node->src)log("src",v);

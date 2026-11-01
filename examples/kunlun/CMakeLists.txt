@@ -38,3 +38,6 @@ add_executable(kunlun-get-rows-inactive-test get-rows-inactive-test.cpp)
 target_link_libraries(kunlun-get-rows-inactive-test PRIVATE ggml ggml-base)
 add_executable(kunlun-get-rows-policy-test get-rows-policy-test.cpp)
 target_link_libraries(kunlun-get-rows-policy-test PRIVATE ggml ggml-base)
+
+add_executable(kunlun-get-rows-f32-test f32-get-rows-test.cpp)
+target_link_libraries(kunlun-get-rows-f32-test PRIVATE ggml ggml-base)

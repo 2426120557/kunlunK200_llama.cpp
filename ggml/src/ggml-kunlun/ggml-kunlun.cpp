@@ -109,7 +109,9 @@ struct ActivationShare {
 struct backend_context {
     ActivationShare activation;
     int id;
-    kernel mv[2], ew, gather, kv, glu, attention, embedding;
+    kernel mv[2], ew, gather, kv, glu, attention, embedding, row_select;
+    size_t row_select_calls=0,row_select_bytes=0;
+    std::map<std::string,size_t> row_select_shapes;
     size_t embedding_calls=0,embedding_tokens=0;
     std::map<int,size_t> embedding_rows;
     std::map<std::string,size_t> attention_phases,attention_shapes;
@@ -567,12 +569,40 @@ void set_rows(backend_context * ctx, ggml_tensor * dst) {
     if (!ok) GGML_ABORT("SET_ROWS %s device index validation failed on PD%d",dst->name,ctx->id);
 }
 
+bool get_rows_f32_enabled() {
+    const char *mode=std::getenv("GGML_KUNLUN_GET_ROWS_F32");
+    return mode && !std::strcmp(mode,"1");
+}
+bool get_rows_f32_supported(const ggml_tensor *t) {
+    const auto *x=t->src[0],*ids=t->src[1];
+    if(!get_rows_f32_enabled() || !x || !ids || x->type!=GGML_TYPE_F32 || x->view_src || !ggml_is_matrix(x) || !ggml_is_contiguous(x) || x->ne[0]<16 || x->ne[0]>1048576 || x->ne[0]%16 || x->ne[1]<1 || x->ne[1]>INT_MAX)return false;
+    for(const auto *s:{x,ids,(const ggml_tensor*)t}) {
+        auto *b=s->view_src?s->view_src->buffer:s->buffer;
+        if(b && is_ours(b->buft) && ((type_context*)b->buft->context)->split)return false;
+    }
+    return ids->type==GGML_TYPE_I32 && ggml_is_contiguous(ids) && ids->ne[0]>=1 && ids->ne[0]<=512 && ids->ne[1]==1 && ids->ne[2]==1 && ids->ne[3]==1 &&
+        t->type==GGML_TYPE_F32 && ggml_is_contiguous(t) && !t->view_src && t->ne[0]==x->ne[0] && t->ne[1]==ids->ne[0] && t->ne[2]==1 && t->ne[3]==1;
+}
+void get_rows_f32_compute(backend_context *ctx,ggml_tensor *t) {
+    const auto *x=t->src[0],*ids=t->src[1];
+    GGML_ASSERT(get_rows_f32_supported(t));
+    for(const auto *s:{x,ids,(const ggml_tensor*)t}) {
+        auto *b=buffer_of(s);GGML_ASSERT(b && !b->type->split && b->type->id==ctx->id);
+    }
+    if(!kunlun::get_rows_f32(ctx->row_select,ctx->id,t->data,ggml_nbytes(t),x->data,ggml_nbytes(x),(const int32_t*)ids->data,ggml_nbytes(ids),x->ne[0],x->ne[1],ids->ne[0]))
+        GGML_ABORT("F32 GET_ROWS %s: invalid indices or pointer contract on PD%d",t->name,ctx->id);
+    ++ctx->row_select_calls;ctx->row_select_bytes+=ggml_nbytes(t);
+    std::string shape=std::to_string(x->ne[0])+"x"+std::to_string(x->ne[1])+"->"+std::to_string(ids->ne[0]);
+    if(!ctx->row_select_shapes[shape]++)std::fprintf(stderr,"KUNLUN F32 GET_ROWS PD%d: %s input=%s indices=%s output=%s CPU-readback=0\n",ctx->id,shape.c_str(),x->name,ids->name,t->name);
+}
+
 bool get_rows_enabled() {
     const char *mode=std::getenv("GGML_KUNLUN_GET_ROWS");
     return mode && !std::strcmp(mode,"1");
 }
 bool get_rows_supported(const ggml_tensor *t) {
     const auto *w=t->src[0],*ids=t->src[1];
+    if(w && w->type==GGML_TYPE_F32)return get_rows_f32_supported(t);
     if(!get_rows_enabled() || !w || !ids || !use_common(w) || w->ne[0]%64 || !ggml_is_matrix(w))return false;
     // Loader probes have a buffer type but no buffer_context.
     if(w->buffer) {
@@ -583,6 +613,7 @@ bool get_rows_supported(const ggml_tensor *t) {
         t->type==GGML_TYPE_F32 && ggml_is_contiguous(t) && t->ne[0]==w->ne[0] && t->ne[1]==ids->ne[0] && t->ne[2]==1 && t->ne[3]==1;
 }
 void get_rows_compute(backend_context *ctx,ggml_tensor *t) {
+    if(t->src[0]->type==GGML_TYPE_F32){get_rows_f32_compute(ctx,t);return;}
     const auto *w=t->src[0],*ids=t->src[1];auto *p=(tensor_parts*)w->extra;auto *wb=buffer_of(w);
     GGML_ASSERT(get_rows_supported(t) && wb && !wb->type->split && wb->type->id==ctx->id && p && p->common && p->common_weight[ctx->id]);
     auto &weight=*p->common_weight[ctx->id];int rows=ids->ne[0];
@@ -713,6 +744,7 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
                 id,s.accelerated,s.fallback,c->i8_mm[id],c->q4_mm[id],s.hbm_workspace_bytes,s.l3_workspace_bytes,
                 native_uploads[id].load(),native_upload_bytes[id].load(),native_upload_ns[id].load()/1e6,kunlun::allocated_bytes(id));
         }
+        if(c->row_select_calls)std::fprintf(stderr,"KUNLUN F32 GET_ROWS totals PD%d: calls=%zu bytes=%zu status_D2H=%zu\n",c->id,c->row_select_calls,c->row_select_bytes,c->row_select_calls*256);
         if(c->embedding_calls)std::fprintf(stderr,"KUNLUN GET_ROWS totals PD%d: calls=%zu tokens=%zu status_D2H=%zu\n",c->id,c->embedding_calls,c->embedding_tokens,c->embedding_calls*256);
         std::fprintf(stderr,"KUNLUN SwiGLU totals PD%d: calls=%zu elements=%zu\n",c->id,c->glu_calls,c->glu_elements);
         for(const auto &v:c->glu_phases)std::fprintf(stderr,"KUNLUN SwiGLU phase PD%d %s calls=%zu\n",c->id,v.first.c_str(),v.second);
