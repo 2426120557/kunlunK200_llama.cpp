@@ -39,3 +39,7 @@ KUNLUN_Q6_K_SDNN=1 uses a lossless W8/K16-scale pack and SDNN for the validated 
 ## Embedding GET_ROWS opt-in
 
 Set GGML_KUNLUN_GET_ROWS=1 together with GGML_KUNLUN_COMMON_Q4=1 to gather supported Q4 rows on XPU. Unset or 0 keeps CPU input. No extra F16/F32 weight copy is stored. Current PP/TG changes are small, so the default is unchanged. Keep KUNLUN_Q6_K_SDNN=1 / KUNLUN_Q6_K_LEGACY=0, SwiGLU=1 and Large PP=0 for the measured configuration. See [contracts](ggml/src/ggml-kunlun/GET_ROWS.md) and [results](ggml/src/ggml-kunlun/GET_ROWS_REPORT.ja.md).
+
+## F32 GET_ROWS opt-in
+
+GGML_KUNLUN_GET_ROWS_F32=1 keeps supported F32 activation row selection on XPU. Unset or 0 retains CPU F32 GET_ROWS. It is independent of GGML_KUNLUN_GET_ROWS for Q4 embedding and changes no Q6/SwiGLU/Large PP defaults. Transfers and graph splits decrease; overall PP/TG speedups are not established, so it remains opt-in. See [contracts](ggml/src/ggml-kunlun/GET_ROWS_F32.md) and [evaluation](ggml/src/ggml-kunlun/GET_ROWS_F32_REPORT.ja.md).
