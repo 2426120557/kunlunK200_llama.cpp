@@ -146,6 +146,9 @@ public:
     ggml_tensor * mixed_embd   = nullptr; // F32 [n_embd, n_batch], mixed path: embd rows, token rows are overwritten
     ggml_tensor * scale_rows   = nullptr; // F32 [1, n_batch], per-row scale: scale_tok for token rows, 1 for embd rows
 
+    // -1: outside the Kunlun specialization; otherwise captures the requested topology policy.
+    int kunlun_prune_mode = -1;
+    bool kunlun_token_only = false;
     float scale_tok = 1.0f;
 
     const int64_t n_embd = 0;

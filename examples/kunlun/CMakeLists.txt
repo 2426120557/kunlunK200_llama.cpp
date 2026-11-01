@@ -41,3 +41,6 @@ target_link_libraries(kunlun-get-rows-policy-test PRIVATE ggml ggml-base)
 
 add_executable(kunlun-get-rows-f32-test f32-get-rows-test.cpp)
 target_link_libraries(kunlun-get-rows-f32-test PRIVATE ggml ggml-base)
+
+add_executable(kunlun-prune-mixed-test prune-mixed-test.cpp)
+target_link_libraries(kunlun-prune-mixed-test PRIVATE llama ggml ggml-base)

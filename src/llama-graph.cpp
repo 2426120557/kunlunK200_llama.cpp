@@ -20,6 +20,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -66,6 +67,11 @@ static bool can_reuse_kq_mask(
 }
 
 // impl
+
+static bool kunlun_prune_mixed_requested() {
+    const char *mode=std::getenv("GGML_KUNLUN_PRUNE_INACTIVE_MIXED");
+    return mode && !std::strcmp(mode,"1");
+}
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
@@ -126,6 +132,8 @@ static int64_t llm_graph_n_tok_rows(const llama_ubatch & ubatch) {
 }
 
 bool llm_graph_input_embd::can_reuse(const llm_graph_params & params) {
+    if (kunlun_prune_mode >= 0 && kunlun_prune_mode != int(kunlun_prune_mixed_requested())) return false;
+    if (kunlun_token_only && (!params.ubatch.token || params.ubatch.embd || params.ubatch.is_mixed() || params.ubatch.embd_state)) return false;
     bool res = true;
 
     res &= (!params.ubatch.token) || (tokens && tokens->ne[0] == params.ubatch.n_tokens);
@@ -2580,9 +2588,21 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
 
     auto inp = std::make_unique<llm_graph_input_embd>(n_embd_inp);
 
+    // Specialize only the tested Kunlun text-inference path. Other inputs keep the original graph.
+    auto *buft=tok_embd->buffer ? ggml_backend_buffer_get_type(tok_embd->buffer) : nullptr;
+    auto *device=buft ? ggml_backend_buft_get_device(buft) : nullptr;
+    const bool kunlun_eligible=arch==LLM_ARCH_LLAMA && device && !std::strncmp(ggml_backend_dev_name(device),"KUNLUN",6) &&
+        tok_embd->type==GGML_TYPE_Q4_0 && n_embd_inp==n_embd && !hdmd && (!loras || loras->empty()) &&
+        cparams.ctx_type==LLAMA_CONTEXT_TYPE_DEFAULT && !cparams.training && !cparams.embeddings && !cparams.pipeline_parallel;
+    inp->kunlun_prune_mode=kunlun_eligible ? int(kunlun_prune_mixed_requested()) : -1;
+    const bool token_only=inp->kunlun_prune_mode==1 && ubatch.token && !ubatch.embd && !ubatch.is_mixed() && !ubatch.embd_state;
+    inp->kunlun_token_only=token_only;
+    if (std::getenv("GGML_KUNLUN_DIAGNOSTICS") && inp->kunlun_prune_mode==1)
+        LLAMA_LOG_INFO("KUNLUN input graph: token_only=%d mixed=%d external_embd=%d tokens=%u\n",int(token_only),int(ubatch.is_mixed()),int(ubatch.embd!=nullptr),ubatch.n_tokens);
+
     // mixed path (ubatch.is_mixed()): set_rows the token rows into a copy of the embd rows, with its own inputs as select branches must not share tensors
     // TODO: use inp->tokens and inp->embd once ggml_build_forward_select allows it
-    const bool has_mixed = llm_arch_supports_mixed_batch(arch) && cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT;
+    const bool has_mixed = !token_only && llm_arch_supports_mixed_batch(arch) && cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT;
 
     const int64_t n_tok_rows = has_mixed ? llm_graph_n_tok_rows(ubatch) : 0;
 
@@ -2601,9 +2621,11 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
         ggml_set_input(inp->tokens);
         res->t_inp_tokens = inp->tokens;
 
-        inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp, ubatch.n_tokens);
-        cb(inp->embd, "inp_embd", -1);
-        ggml_set_input(inp->embd);
+        if (!token_only) {
+            inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp, ubatch.n_tokens);
+            cb(inp->embd, "inp_embd", -1);
+            ggml_set_input(inp->embd);
+        }
 
         if (has_mixed) {
             inp->mixed_tokens = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tok_rows);
@@ -2676,8 +2698,10 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
     // vector embeddings path (ubatch.embd != nullptr)
     inps[1] = embd1;
 
-    assert(ggml_are_same_shape (inps[0], inps[1]));
-    assert(ggml_are_same_stride(inps[0], inps[1]));
+    if (!token_only) {
+        assert(ggml_are_same_shape (inps[0], inps[1]));
+        assert(ggml_are_same_stride(inps[0], inps[1]));
+    }
 
     if (has_mixed) {
         inp->mixed_slots = ggml_new_tensor_1d(ctx0, GGML_TYPE_I64, n_tok_rows);
@@ -2698,7 +2722,9 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
 
     const int idx = ubatch.is_mixed() ? 2 : ubatch.token ? 0 : 1;
 
-    ggml_tensor * cur = ggml_build_forward_select(gf, inps.data(), has_mixed ? 3 : 2, idx);
+    ggml_tensor * cur = inps[0];
+    if (token_only) ggml_build_forward_expand(gf, cur);
+    else cur = ggml_build_forward_select(gf, inps.data(), has_mixed ? 3 : 2, idx);
 
     if (n_embd_inp != n_embd) {
         cur = ggml_view_2d(ctx0, cur, n_embd, n_tokens, cur->nb[1], 0);
