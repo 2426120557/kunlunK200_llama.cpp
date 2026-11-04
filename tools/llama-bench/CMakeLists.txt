@@ -22,4 +22,8 @@ target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} RUNTIME)
+    install(FILES bench_affinity.py kunlun_guarded_runner.py DESTINATION share/llama-bench)
+    install(PROGRAMS bench_affinity.py DESTINATION bin RENAME llama-bench-affinity)
+    install(FILES bench-main-affinity.h DESTINATION include/llama-bench)
+    install(FILES BENCH_AFFINITY.ja.md DESTINATION share/doc/llama-bench)
 endif()

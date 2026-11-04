@@ -1,3 +1,4 @@
+#include "bench-main-affinity.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -2375,6 +2376,10 @@ int llama_bench(int argc, char ** argv) {
             prev_inst = &inst;
         }
 
+        if (std::getenv("K200_BENCH_SEQUENCE")) {
+            const char * v=std::getenv("K200_BENCH_SWITCH");
+            if (v && (!std::strcmp(v,"GGML_KUNLUN_Q4_GATE_UP_PAIR") || !std::strcmp(v,"KUNLUN_Q4_GEMV_SUM_FAST")))setenv(v,"0",1);
+        }
         llama_context * ctx = llama_init_from_model(lmodel, cparams);
         if (ctx == NULL) {
             fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, inst.model.c_str());
@@ -2441,7 +2446,27 @@ int llama_bench(int argc, char ** argv) {
             }
         }
 
+        const char * paired_sequence = std::getenv("K200_BENCH_SEQUENCE");
+        const char * paired_variable = std::getenv("K200_BENCH_SWITCH");
+        if (paired_sequence && *paired_sequence) {
+            if (!paired_variable || (std::strcmp(paired_variable,"GGML_KUNLUN_Q4_GATE_UP_PAIR") && std::strcmp(paired_variable,"KUNLUN_Q4_GEMV_SUM_FAST")) ||
+                (int)std::strlen(paired_sequence)!=params.reps || t.n_depth) { std::fprintf(stderr,"invalid paired benchmark contract\n"); std::exit(1); }
+            for (const char * p=paired_sequence;*p;++p) if (*p!='0' && *p!='1')std::exit(1);
+            std::fprintf(stderr,"K200PAIR protocol full_workload_warmup=0,1 seed=1234; use per-trial records, not mixed JSON averages\n");
+            for (const char * mode : {"0","1"}) {
+                setenv(paired_variable,mode,1);std::srand(1234);
+                llama_memory_clear(llama_get_memory(ctx),false);
+                if ((t.n_prompt>0 && !test_prompt(ctx,t.n_prompt,t.n_batch,t.n_threads)) ||
+                    (t.n_gen>0 && !test_gen(ctx,t.n_gen,t.n_threads)))std::exit(1);
+            }
+        }
+        bench_main_affinity main_affinity;
+        if (!main_affinity.apply_from_env()) std::exit(1);
+        const bool split_timing = std::getenv("LLAMA_BENCH_SPLIT_TIMING") && !std::strcmp(std::getenv("LLAMA_BENCH_SPLIT_TIMING"), "1");
         for (int i = 0; i < params.reps; i++) {
+            if (paired_sequence && *paired_sequence) {
+                char mode[2]={paired_sequence[i],0};setenv(paired_variable,mode,1);std::srand(1234);
+            }
             llama_memory_clear(llama_get_memory(ctx), false);
 
             if (t.n_depth > 0) {
@@ -2481,7 +2506,7 @@ int llama_bench(int argc, char ** argv) {
                 }
             }
 
-            uint64_t t_start = get_time_ns();
+            uint64_t t_start = get_time_ns(), pp_end = t_start;
 
             if (t.n_prompt > 0) {
                 if (params.progress) {
@@ -2496,6 +2521,7 @@ int llama_bench(int argc, char ** argv) {
                     exit(1);
                 }
             }
+            if (split_timing) pp_end = get_time_ns();
             if (t.n_gen > 0) {
                 if (params.progress) {
                     fprintf(stderr, "llama-bench: benchmark %d/%zu: generation run %d/%d\n", params_idx, params_count,
@@ -2512,6 +2538,9 @@ int llama_bench(int argc, char ** argv) {
 
             uint64_t t_ns = get_time_ns() - t_start;
             t.samples_ns.push_back(t_ns);
+            if (split_timing) std::fprintf(stderr,"BENCH_SPLIT trial=%d pp=%d tg=%d pp_ns=%llu tg_ns=%llu total_ns=%llu kv_end=%lld\n",i,t.n_prompt,t.n_gen,(unsigned long long)(t.n_prompt?pp_end-t_start:0),(unsigned long long)(t.n_gen?t_ns-(pp_end-t_start):0),(unsigned long long)t_ns,(long long)llama_memory_seq_pos_max(llama_get_memory(ctx),0));
+            if (paired_sequence && *paired_sequence)std::fprintf(stderr,"K200PAIR phase=%s trial=%d variable=%s mode=%c ns=%llu\n",
+                t.n_prompt?"pp":"tg",i,paired_variable,paired_sequence[i],(unsigned long long)t_ns);
         }
 
         if (p) {
@@ -2525,6 +2554,8 @@ int llama_bench(int argc, char ** argv) {
         }
 
         llama_perf_context_print(ctx);
+
+        if (!main_affinity.restore()) std::exit(1);
 
         llama_free(ctx);
 

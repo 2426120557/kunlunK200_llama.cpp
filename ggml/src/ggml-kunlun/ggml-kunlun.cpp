@@ -108,6 +108,11 @@ struct ActivationShare {
 };
 struct backend_context {
     ActivationShare activation;
+    size_t pair_calls=0,pair_candidates=0,pair_fallbacks=0;
+    bool pair_diagnostics=std::getenv("GGML_KUNLUN_Q4_GATE_UP_PAIR_STATS") && !std::strcmp(std::getenv("GGML_KUNLUN_Q4_GATE_UP_PAIR_STATS"),"1");
+    unsigned pair_modes_seen=0;
+    size_t pair_skips[6]={},pair_reasons[9]={};
+    uint64_t pair_generation=0;
     int id;
     kernel mv[2], ew, gather, kv, glu, attention, embedding, row_select;
     size_t row_select_calls=0,row_select_bytes=0;
@@ -267,6 +272,7 @@ ggml_backend_buffer_t alloc_buffer(ggml_backend_buffer_type_t bt, size_t size) {
 }
 
 #include "q4-activation-share.inc"
+#include "q4-gate-up-pair.inc"
 
 void launch_mv(backend_context * ctx, int id, void * y, const void * w, const void * x, int k, int n, int batch, int type, tensor_parts * packed = nullptr) {
     if(packed&&packed->q6){
@@ -756,15 +762,26 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
         for(const auto &v:c->attention_phases)std::fprintf(stderr,"KUNLUN Attention phase PD%d %s calls=%zu\n",c->id,v.first.c_str(),v.second);
         if(c->activation.enabled)std::fprintf(stderr,"KUNLUN activation graph PD%d: graphs=%zu groups=%zu writes=%zu p2p_saved_calls=%zu p2p_saved_bytes=%zu\n",
             c->id,c->activation.graphs,c->activation.groups,c->activation.write_invalidations,c->activation.peer_saved_calls,c->activation.peer_saved_bytes);
+        if(c->pair_diagnostics){auto ps=kunlun::common_q4_pair_statistics(c->common[c->id]);
+            std::fprintf(stderr,"KUNLUN GateUp pair PD%d: candidates=%zu calls=%zu fallback=%zu sdnn_launches_saved=%zu sum_launches_saved=%zu l3=%zu\n",c->id,c->pair_candidates,c->pair_calls,c->pair_fallbacks,c->pair_calls,c->pair_calls,ps.l3_partial_bytes);}
+        if(c->pair_diagnostics){
+            std::fprintf(stderr,"KUNLUN GateUp modes PD%d: seen=%u\n",c->id,c->pair_modes_seen);
+            const char *skips[]={"tensor_eligibility","different_input","output_consumers","swiglu_pattern","shape_or_weight","no_pair_graph"};
+            const char *reasons[]={"not_attempted","success","disabled","invalid_input","configuration","weight_abi","lease","alias","workspace"};
+            for(size_t i=0;i<6;++i)if(c->pair_skips[i])std::fprintf(stderr,"KUNLUN GateUp skip PD%d: reason=%s count=%zu\n",c->id,skips[i],c->pair_skips[i]);
+            for(size_t i=0;i<9;++i)if(c->pair_reasons[i])std::fprintf(stderr,"KUNLUN GateUp decline PD%d: reason=%s count=%zu\n",c->id,reasons[i],c->pair_reasons[i]);
+        }
         delete c; delete b;
     };
     iface.graph_compute = [](ggml_backend_t b, ggml_cgraph * graph) {
         std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
         auto * c = (backend_context *)b->context;
         ActivationGraphScope activation_scope(c,graph);
+        GateUpGraphScope pair_scope(c,graph);
         for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
             auto * t = ggml_graph_node(graph,i);
             if(t->op==GGML_OP_GET_ROWS && !(t->flags & GGML_TENSOR_FLAG_COMPUTE))continue;
+            if(pair_scope.execute(t)){++i;continue;}
             if(c->activation.enabled)activation_write(c,t);
             K200_DIAG_SCOPE(node_diag,"xpu.node",ggml_op_name(t->op),t->name);
             kunlun::diagnostic_tensor(t->name,t->ne);
