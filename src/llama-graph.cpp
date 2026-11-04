@@ -70,7 +70,7 @@ static bool can_reuse_kq_mask(
 
 static bool kunlun_prune_mixed_requested() {
     const char *mode=std::getenv("GGML_KUNLUN_PRUNE_INACTIVE_MIXED");
-    return mode && !std::strcmp(mode,"1");
+    return !mode || !std::strcmp(mode,"1");
 }
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {

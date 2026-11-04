@@ -1682,7 +1682,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     pimpl->dev_input = { cpu_dev, &pimpl->cpu_buft_list };
     const char *embedding_mode=std::getenv("GGML_KUNLUN_GET_ROWS");
     const auto *embedding=ml.get_tensor_meta("token_embd.weight");
-    if(embedding_mode && !std::strcmp(embedding_mode,"1") && embedding && embedding->type==GGML_TYPE_Q4_0 && !devices.empty()) {
+    if((!embedding_mode || !std::strcmp(embedding_mode,"1")) && embedding && embedding->type==GGML_TYPE_Q4_0 && !devices.empty()) {
         auto candidate=get_layer_buft_list(0);
         // A tied row-split output cannot share one full input weight allocation.
         bool tied_row_split=split_mode==LLAMA_SPLIT_MODE_ROW && !ml.get_tensor_meta("output.weight");

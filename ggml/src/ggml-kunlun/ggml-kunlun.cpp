@@ -32,7 +32,7 @@ std::map<std::string,std::array<size_t,3>> common_mac_phase[2];
 #endif
 bool common_enabled() {
     const char * s=std::getenv("GGML_KUNLUN_COMMON_Q4");
-    return s && std::strcmp(s,"1")==0;
+    return !s || std::strcmp(s,"1")==0;
 }
 void log_common_totals() {
     std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
@@ -149,7 +149,7 @@ buffer_context * buffer_of(const ggml_tensor * t) {
     auto * buf = t->view_src ? t->view_src->buffer : t->buffer;
     return buf && is_ours(buf->buft) ? (buffer_context *)buf->context : nullptr;
 }
-bool q6_enabled(){const char*s=std::getenv("KUNLUN_Q6_K_SDNN");return s&&!std::strcmp(s,"1");}
+bool q6_enabled(){const char*s=std::getenv("KUNLUN_Q6_K_SDNN");return !s||!std::strcmp(s,"1");}
 bool use_q6(const ggml_tensor*t){return q6_enabled()&&t->type==GGML_TYPE_Q6_K&&!t->view_src&&ggml_is_matrix(t)&&ggml_is_contiguous(t)&&(t->ne[0]==2048||t->ne[0]==4096)&&t->ne[1]==32000;}
 bool use_common(const ggml_tensor * t) {
     return common_enabled() && t->type==GGML_TYPE_Q4_0 && ggml_is_matrix(t) && ggml_is_contiguous(t) && !t->view_src &&
@@ -577,7 +577,7 @@ void set_rows(backend_context * ctx, ggml_tensor * dst) {
 
 bool get_rows_f32_enabled() {
     const char *mode=std::getenv("GGML_KUNLUN_GET_ROWS_F32");
-    return mode && !std::strcmp(mode,"1");
+    return !mode || !std::strcmp(mode,"1");
 }
 bool get_rows_f32_supported(const ggml_tensor *t) {
     const auto *x=t->src[0],*ids=t->src[1];
@@ -604,7 +604,7 @@ void get_rows_f32_compute(backend_context *ctx,ggml_tensor *t) {
 
 bool get_rows_enabled() {
     const char *mode=std::getenv("GGML_KUNLUN_GET_ROWS");
-    return mode && !std::strcmp(mode,"1");
+    return !mode || !std::strcmp(mode,"1");
 }
 bool get_rows_supported(const ggml_tensor *t) {
     const auto *w=t->src[0],*ids=t->src[1];
@@ -857,7 +857,8 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
                 std::getenv("KUNLUN_LARGE_PP") ? std::getenv("KUNLUN_LARGE_PP") : "0(default)",
                 glu_setting ? glu_setting : "1(default)");
         }
-        if (common_enabled()) std::fprintf(stderr,"KUNLUN common Q4 opt-in: common ABI v1 > legacy native > requant I8; M>1 Row A8, M=1 two-component A8\n");
+        std::fprintf(stderr,"KUNLUN effective defaults: common_q4=%d q6_sdnn=%d get_rows=%d get_rows_f32=%d prune_mixed=%s large_pp=%s swiglu=%s\n",int(common_enabled()),int(q6_enabled()),int(get_rows_enabled()),int(get_rows_f32_enabled()),std::getenv("GGML_KUNLUN_PRUNE_INACTIVE_MIXED")?std::getenv("GGML_KUNLUN_PRUNE_INACTIVE_MIXED"):"1(default)",std::getenv("KUNLUN_LARGE_PP")?std::getenv("KUNLUN_LARGE_PP"):"0(default)",std::getenv("GGML_KUNLUN_SWIGLU")?std::getenv("GGML_KUNLUN_SWIGLU"):"1(default)");
+        if (common_enabled()) std::fprintf(stderr,"KUNLUN common Q4 enabled: common ABI v1 > legacy native > requant I8; M>1 Row A8, M=1 two-component A8\n");
         type_iface.get_name = [](ggml_backend_buffer_type_t b) { return ((type_context *)b->context)->name.c_str(); };
         type_iface.alloc_buffer = alloc_buffer;
         type_iface.get_alignment = [](ggml_backend_buffer_type_t) -> size_t { return 256; };
