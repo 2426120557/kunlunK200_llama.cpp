@@ -1,0 +1,34 @@
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/simd.h"
+
+// 两路 F32 加法合成一次 launch（子图合并第一步）。
+// 每路：y = a + b；bc=1 时 b 是 [width] 的 bias，按行广播。
+// rows/width 每路独立，所以形状不同的两个 ADD（如 q=896 与 k=128）也能合并。
+// 注意：kernel 参数在 global 地址空间，不能赋给私有指针变量，所以用宏就地展开。
+#define KUNLUN_ADD_ONE(Y, A, B, ROWS, W, BC)                                   \
+    do {                                                                       \
+        int chunks_ = ((W) + 255) / 256;                                        \
+        int total_ = (ROWS) * chunks_;                                          \
+        for (int idx_ = tid; idx_ < total_; idx_ += threads) {                  \
+            int row_ = idx_ / chunks_;                                          \
+            int base_ = (idx_ - row_ * chunks_) * 256;                          \
+            int len_ = (W) - base_; if (len_ > 256) len_ = 256;                 \
+            int off_ = row_ * (W) + base_;                                      \
+            GM2LM((A) + off_, av, len_ * 4);                                    \
+            GM2LM((B) + ((BC) ? base_ : off_), bv, len_ * 4);                   \
+            for (int j_ = 0; j_ < len_; ++j_) ov[j_] = av[j_] + bv[j_];         \
+            LM2GM(ov, (Y) + off_, len_ * 4);                                    \
+        }                                                                       \
+    } while (0)
+
+__global__ void kunlun_elementwise_add2(
+    float * y0, const float * a0, const float * b0, int rows0, int w0, int bc0,
+    float * y1, const float * a1, const float * b1, int rows1, int w1, int bc1) {
+    __local__ float av[256];
+    __local__ float bv[256];
+    __local__ float ov[256];
+    int tid = cluster_id() * core_num() + core_id();
+    int threads = cluster_num() * core_num();
+    if (rows0 > 0 && w0 > 0) KUNLUN_ADD_ONE(y0, a0, b0, rows0, w0, bc0);
+    if (rows1 > 0 && w1 > 0) KUNLUN_ADD_ONE(y1, a1, b1, rows1, w1, bc1);
+}

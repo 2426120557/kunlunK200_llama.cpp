@@ -1,0 +1,43 @@
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/simd.h"
+
+// 一段 y = a + b 的公共体（b 可为同形状，或 bc=1 时按行广播的 [width] 偏置）。
+// 注意两条硬约束（今晚踩过）：
+//   1) global 指针只能作为参数/表达式，不能落进局部变量（address space 不允许）
+//   2) 4 字节 DMA 的 LM 目的地址必须对齐——所以 ov/av/bv 都是独立对齐数组
+static __device__ void kunlun_add_seg(_global_ptr_ float * y, _global_ptr_ const float * a,
+                                      _global_ptr_ const float * b, int rows, int width, int bc) {
+    __local__ float av[256];
+    __local__ float bv[256];
+    __local__ float ov[256];
+    const int tid = cluster_id() * core_num() + core_id();
+    const int threads = cluster_num() * core_num();
+    const int chunks = (width + 255) / 256;
+    const int total = rows * chunks;
+    for (int idx = tid; idx < total; idx += threads) {
+        const int row = idx / chunks;
+        const int base = (idx - row * chunks) * 256;
+        int len = width - base;
+        if (len > 256) len = 256;
+        const int off = row * width + base;
+        GM2LM(a + off, av, len * 4);
+        if (bc) {
+            GM2LM(b + base, bv, len * 4);
+        } else {
+            GM2LM(b + off, bv, len * 4);
+        }
+        for (int j = 0; j < len; ++j) ov[j] = av[j] + bv[j];
+        LM2GM(ov, y + off, len * 4);
+    }
+}
+
+// 三段不同形状的 bias/residual 加法合成一次 launch（q/k/v 前端用）。
+// rows==0 表示该段跳过。
+__global__ void kunlun_elementwise_add3(
+        float * y0, const float * a0, const float * b0, int rows0, int w0, int bc0,
+        float * y1, const float * a1, const float * b1, int rows1, int w1, int bc1,
+        float * y2, const float * a2, const float * b2, int rows2, int w2, int bc2) {
+    if (rows0 > 0 && w0 > 0) kunlun_add_seg(y0, a0, b0, rows0, w0, bc0);
+    if (rows1 > 0 && w1 > 0) kunlun_add_seg(y1, a1, b1, rows1, w1, bc1);
+    if (rows2 > 0 && w2 > 0) kunlun_add_seg(y2, a2, b2, rows2, w2, bc2);
+}

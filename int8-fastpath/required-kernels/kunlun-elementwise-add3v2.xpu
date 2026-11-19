@@ -1,0 +1,50 @@
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/simd.h"
+
+/* add3 第三版：消除 v1 的两个疑点
+ *  (1) 全部内联在 __global__，不用 __device__ helper —— v1 的 helper 里声明
+ *      __local__ 数组并传 _global_ptr_ 指针，第一次 launch 就把 dev0 打到 E；
+ *  (2) 每段 (rows,width,bc) 打包成 1 个 int，参数区 9*8 + 3*4 = 84 B
+ *      （v1 是 108 B；已知能跑的 gdn 是 88 B）；
+ *  (3) 三段共用同一组 __local__ 缓冲，写法完全对齐已验证的 kunlun-elementwise。
+ * 另外 host 侧保证空段也传有效设备指针（rows=0 时跳过），不传 nullptr。
+ *
+ * cfg = (bc << 30) | (width << 12) | rows   ; rows <= 4095, width <= 262143
+ */
+#define KUNLUN_ADD3_ONE(Y, A, B, CFG)                                        \
+    do {                                                                      \
+        int cfg_ = (CFG);                                                     \
+        int rows_ = cfg_ & 0xfff;                                            \
+        int width_ = (cfg_ >> 12) & 0x3ffff;                                 \
+        int bc_ = (cfg_ >> 30) & 1;                                          \
+        if (rows_ > 0 && width_ > 0) {                                       \
+            int chunks_ = (width_ + 255) / 256;                              \
+            int total_ = rows_ * chunks_;                                    \
+            for (int idx_ = tid; idx_ < total_; idx_ += threads) {           \
+                int row_ = idx_ / chunks_;                                   \
+                int base_ = (idx_ - row_ * chunks_) * 256;                   \
+                int len_ = width_ - base_;                                   \
+                if (len_ > 256) len_ = 256;                                  \
+                int off_ = row_ * width_ + base_;                            \
+                GM2LM((A) + off_, av, len_ * 4);                             \
+                GM2LM((B) + (bc_ ? base_ : off_), bv, len_ * 4);              \
+                for (int j_ = 0; j_ < len_; ++j_) ov[j_] = av[j_] + bv[j_];  \
+                LM2GM(ov, (Y) + off_, len_ * 4);                             \
+            }                                                                 \
+        }                                                                     \
+    } while (0)
+
+__global__ void kunlun_elementwise_add3v2(
+        float * y0, const float * a0, const float * b0,
+        float * y1, const float * a1, const float * b1,
+        float * y2, const float * a2, const float * b2,
+        int cfg0, int cfg1, int cfg2) {
+    __local__ float av[256];
+    __local__ float bv[256];
+    __local__ float ov[256];
+    int tid = cluster_id() * core_num() + core_id();
+    int threads = cluster_num() * core_num();
+    KUNLUN_ADD3_ONE(y0, a0, b0, cfg0);
+    KUNLUN_ADD3_ONE(y1, a1, b1, cfg1);
+    KUNLUN_ADD3_ONE(y2, a2, b2, cfg2);
+}

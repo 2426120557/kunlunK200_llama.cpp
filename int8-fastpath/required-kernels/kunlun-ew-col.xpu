@@ -1,0 +1,25 @@
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/simd.h"
+
+// y[.., j] = a[.., j] OP b[j]，b 形状 [1, rows]（逐列广播）。op: 0=ADD 1=MUL
+__global__ void kunlun_ew_col(float * y, const float * a, const float * b,
+                              int rows, int width, int op) {
+    __local__ float av[256];
+    __local__ float ov[256];
+    __local__ float bs[8];
+    const int tid = cluster_id() * core_num() + core_id();
+    const int threads = cluster_num() * core_num();
+    for (int r = tid; r < rows; r += threads) {
+        GM2LM(b + r, bs, 4);
+        const float bv = bs[0];
+        for (int base = 0; base < width; base += 256) {
+            int len = width - base;
+            if (len > 256) len = 256;
+            GM2LM(a + (long) r * width + base, av, len * 4);
+            for (int j = 0; j < len; ++j) {
+                ov[j] = (op == 1) ? av[j] * bv : av[j] + bv;
+            }
+            LM2GM(ov, y + (long) r * width + base, len * 4);
+        }
+    }
+}

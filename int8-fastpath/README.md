@@ -1,4 +1,4 @@
-# Kunlun K200 int8 快路径调优 patch（存档，未推送）
+# Kunlun K200 int8 快路径调优 patch（存档）
 
 生成日期：2026-11-20
 基线：fork `UnagiDojyou/kunlunK200_llama.cpp` @ `9e5d5a3`（vendor `bd99c9d` / 库 0.7.12）
@@ -41,18 +41,42 @@
 无法在"只交 int8、不交 MoE 和其他"的约束下产出一个能编译的纯净子集。
 这个约束在本代码库里技术上无解——int8 改动与其他实验深度交织。
 
-## 如何应用（在基线 9e5d5a3 上）
+## ★ 已实测验证：能跑出 17 t/s（2026-11-20）
 
-```bash
-cd < kunlunK200_llama.cpp 检出 >
-git apply /path/to/backend-full.patch
-cd vendor/KunlunK200 && git apply /path/to/vendor-full.patch && cd ../..
-# 或使用精简版（需自行验证）
-git apply /path/to/backend-int8.patch
-cd vendor/KunlunK200 && git apply /path/to/vendor-int8.patch && cd ../..
+用本目录的 **full patch + required-kernels**（下文安装步骤）在干净基线 9e5d5a3 上
+重编，7B Q4_0 模型（`-sm row` + W8/int8）实测：
+
+```
+TG 16.91 / 17.11 / 17.65 t/s  → 中位数 17.11 t/s
+PP ~50 t/s
 ```
 
-两个 full patch 与两个精简 patch 均已用 `git apply --check` 在基线验证（返回 0）。
+对照：上游 0.7.14 未打 patch 的同机同配置为 6.3 t/s。**这个提交确实能把 7B 恢复到 17 t/s。**
+
+## 如何应用（在基线 9e5d5a3 上）
+
+⚠️ **仅 `git apply` 两个 patch 不够**——还缺 8 个 untracked 的 kernel 源文件，
+否则编译报 `kunlun-dequant-q4-f32.xpu missing`。完整步骤：
+
+```bash
+cd < kunlunK200_llama.cpp 检出 >          # 基线 9e5d5a3 / vendor bd99c9d
+git apply /path/to/backend-full.patch
+cd vendor/KunlunK200
+git apply /path/to/vendor-full.patch
+cp /path/to/required-kernels/*.xpu kernels/   # ← 关键：8 个 kernel 必须补上
+cd ../..
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_KUNLUN=ON -DGGML_NATIVE=ON \
+  -DKUNLUN_XRE=/usr/local/xpu-4.33.0 \
+  -DKUNLUN_XPUAPI=/opt/llm/sdk/xdnn-20220919/so/libxpuapi.so \
+  -DKUNLUN_XTDK=/opt/llm/sdk/xtdk-llvm15-ubuntu1604_x86_64
+XDNN=/opt/llm/sdk/xdnn-20220919 cmake -S . -B build -G Ninja   # XDNN 环境变量
+ninja -C build
+```
+
+运行需 W8/int8 环境变量（见 `start_qwen7b.sh`）：`GGML_KUNLUN_COMMON_Q4=0`
+`GGML_KUNLUN_REQUANT_I8=1` `KUNLUN_I8_GEMM=1` + attention/flash/rope。
+
+精简版 patch（backend-int8/vendor-int8）已实测**编译失败**，仅作改动范围参考，勿用。
 
 ## 重新生成精简版
 
@@ -74,7 +98,7 @@ python3 extract_int8.py vendor   vendor-full.patch   vendor-int8.patch
 - 上游新增的 tensor-split 融合特性与本 patch 是两条不同路线，可能冲突。
 - 本 patch 与硬件/驱动强绑定（K200 4.33.0 驱动、xdnn-20220919 SDK、0.7.12 库 ABI）。
 
-## 未推送说明
+## 推送说明
 
-按用户要求仅本地存档，**未 push、未提 PR**。fork `2426120557/kunlunK200_llama.cpp` 已建好，
-如需推送到 `wip/int8-fastpath` 分支，由用户自行操作。
+本交付包存放于 fork `2426120557/kunlunK200_llama.cpp` 的 `wip/int8-fastpath` 分支，
+仅作存档，**未提 PR**。内容经过脱敏（无凭证），可安全公开。

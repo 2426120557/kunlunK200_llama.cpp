@@ -1,0 +1,73 @@
+#include "xpu/kernel/cluster_header.h"
+#include "xpu/kernel/simd.h"
+#include "xpu/kernel/math.h"
+
+// Gated Delta Net：单 token（n_tokens==1）状态更新。
+// state 每个 (head,seq) 一块 [S_v,S_v]，转置存储 s[j*S_v+i] = S[i][j]，故 row j 连续。
+// out 布局 [S_v, H_v, 1, n_seqs] 连续。g 支持逐通道 (kda=1) 与标量两种。
+// 注意：global 指针不能落进局部变量（address space 限制），一律用内联偏移。
+__global__ void kunlun_gdn_step(
+        float * out, float * sout,
+        const float * q, const float * k, const float * v,
+        const float * g, const float * beta, const float * sin,
+        int S_v, int H_v, int H_k, int n_seqs, int kda, float scale) {
+    __local__ float rows[8 * 256];
+    __local__ float kv[256];
+    __local__ float qv[256];
+    __local__ float vv[256];
+    __local__ float eg[256];
+    __local__ float oval[256];
+    __local__ float tmp[16];
+    __local__ float tb[8];
+    __local__ float tg[8];
+
+    const int tid = cluster_id() * core_num() + core_id();
+    const int threads = cluster_num() * core_num();
+    const int total = H_v * n_seqs;
+    const long sv = (long) S_v;
+
+    for (int job = tid; job < total; job += threads) {
+        const int ih  = job % H_v;
+        const int ib  = job / H_v;
+        const int ihk = ih % H_k;
+
+        const long off_state = (long) (ib * H_v + ih) * sv * sv;
+        const long off_qk    = ((long) ib * H_k + ihk) * sv;
+        const long off_v     = (long) (ib * H_v + ih) * sv;
+        const long off_g     = (long) (ib * H_v + ih) * (kda ? sv : 1);
+
+        GM2LM(k + off_qk, kv, sv * 4);
+        GM2LM(q + off_qk, qv, sv * 4);
+        GM2LM(v + off_v, vv, sv * 4);
+        GM2LM(beta + (long) ib * H_v + ih, tb, 4);
+        const float bval = tb[0];
+
+        if (kda) {
+            GM2LM(g + off_g, eg, sv * 4);
+            for (int i = 0; i < S_v; ++i) eg[i] = expf(eg[i]);
+        } else {
+            GM2LM(g + off_g, tg, 4);
+            const float e = expf(tg[0]);
+            for (int i = 0; i < S_v; ++i) eg[i] = e;
+        }
+
+        for (int jb = 0; jb < S_v; jb += 8) {
+            int nr = S_v - jb;
+            if (nr > 8) nr = 8;
+            GM2LM(sin + off_state + (long) jb * sv, rows, nr * sv * 4);
+            for (int r = 0; r < nr; ++r) {
+                __local__ float * row = rows + r * S_v;
+                for (int i = 0; i < S_v; ++i) row[i] *= eg[i];
+                float sk = 0.0f;
+                for (int i = 0; i < S_v; ++i) sk += row[i] * kv[i];
+                const float dl = (vv[jb + r] - sk) * bval;
+                for (int i = 0; i < S_v; ++i) row[i] += kv[i] * dl;
+                float sq = 0.0f;
+                for (int i = 0; i < S_v; ++i) sq += row[i] * qv[i];
+                oval[jb + r] = sq * scale;
+            }
+            LM2GM(rows, sout + off_state + (long) jb * sv, nr * sv * 4);
+        }
+        LM2GM(oval, out + off_v, sv * 4);
+    }
+}

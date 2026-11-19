@@ -1,0 +1,75 @@
+// kunlun-dequant-q4-f32
+// q4_0 (GGUF 原始布局：18 字节/32 权重，fp16 d + 16 字节 nibble) -> fp32
+// 用于 prefill 走 FP32 张量引擎（xdnn::fc）前的权重展开。
+//
+// 关键点（都是实测出来的）：
+//  - KL1 没有 FMA，`a*d - 8d` 是两条浮点指令；改成整数的 `(nib-8)` 再乘，能少一条浮点依赖。
+//  - KL1 没有 fp16 硬件转换，但 int->float 有 fix2float 单指令，所以出 fp32 才是对的路。
+//  - 标量核只有 64 个（4 cluster x 16 core），靠 4 个 block 交错（16 条独立依赖链）盖住延迟。
+//  - 实测 5120x13824：13.7 ms，23.5 GB/s，逐位正确。
+//
+// 约束：总 block 数必须能被 CHUNK_BLOCKS 整除（13B/7B/0.5B 的所有矩阵都满足），
+//       否则需要补尾部处理。
+#include "xpu/kernel/cluster_header.h"
+
+#define CHUNK_BLOCKS 64
+#define CHUNK_IN     (CHUNK_BLOCKS * 9)      // 576 ushort = 1152B
+#define CHUNK_OUT    (CHUNK_BLOCKS * 32)     // 2048 float = 8KB
+
+static __device__ float h2f(unsigned short h) {
+    unsigned int e = (h >> 10) & 31, m = h & 1023, sign = (h & 32768) << 16;
+    union { unsigned int u; float f; } v;
+    if (e == 0) {
+        if (m == 0) { v.u = sign; return v.f; }
+        int shift = 0;
+        while ((m & 1024) == 0) { m <<= 1; ++shift; }
+        v.u = sign | ((113 - shift) << 23) | ((m & 1023) << 13);
+    } else {
+        v.u = sign | ((e == 31 ? 255 : e + 112) << 23) | (m << 13);
+    }
+    return v.f;
+}
+
+__global__ void kunlun_dequant_q4_f32(_global_ptr_ float * out,
+                                      _global_ptr_ const unsigned short * w,
+                                      int nchunks) {
+    __local__ unsigned short in[CHUNK_IN];
+    __local__ float dst[CHUNK_OUT];
+    int tid = cluster_id() * core_num() + core_id();
+    int threads = cluster_num() * core_num();
+
+    for (int c = tid; c < nchunks; c += threads) {
+        GM2LM(w + c * CHUNK_IN, in, CHUNK_IN * 2);
+        // 4 个 block 交错：16 条独立依赖链，把 fix2float / 乘法延迟藏起来
+        for (int b = 0; b < CHUNK_BLOCKS; b += 4) {
+            const unsigned short * q0 = in + b * 9;
+            const unsigned short * q1 = in + (b + 1) * 9;
+            const unsigned short * q2 = in + (b + 2) * 9;
+            const unsigned short * q3 = in + (b + 3) * 9;
+            float d0 = h2f(q0[0]), d1 = h2f(q1[0]), d2 = h2f(q2[0]), d3 = h2f(q3[0]);
+            float * o0 = dst + b * 32, * o1 = dst + (b + 1) * 32;
+            float * o2 = dst + (b + 2) * 32, * o3 = dst + (b + 3) * 32;
+#pragma unroll 8
+            for (int j = 0; j < 8; ++j) {
+                unsigned short v0 = q0[1 + j], v1 = q1[1 + j], v2 = q2[1 + j], v3 = q3[1 + j];
+                o0[2 * j]      = (float)((int)(v0 & 0x0F)        - 8) * d0;
+                o1[2 * j]      = (float)((int)(v1 & 0x0F)        - 8) * d1;
+                o2[2 * j]      = (float)((int)(v2 & 0x0F)        - 8) * d2;
+                o3[2 * j]      = (float)((int)(v3 & 0x0F)        - 8) * d3;
+                o0[2 * j + 16] = (float)((int)((v0 >> 4) & 0x0F) - 8) * d0;
+                o1[2 * j + 16] = (float)((int)((v1 >> 4) & 0x0F) - 8) * d1;
+                o2[2 * j + 16] = (float)((int)((v2 >> 4) & 0x0F) - 8) * d2;
+                o3[2 * j + 16] = (float)((int)((v3 >> 4) & 0x0F) - 8) * d3;
+                o0[2 * j + 1]  = (float)((int)((v0 >> 8) & 0x0F) - 8) * d0;
+                o1[2 * j + 1]  = (float)((int)((v1 >> 8) & 0x0F) - 8) * d1;
+                o2[2 * j + 1]  = (float)((int)((v2 >> 8) & 0x0F) - 8) * d2;
+                o3[2 * j + 1]  = (float)((int)((v3 >> 8) & 0x0F) - 8) * d3;
+                o0[2 * j + 17] = (float)((int)((v0 >> 12) & 0x0F) - 8) * d0;
+                o1[2 * j + 17] = (float)((int)((v1 >> 12) & 0x0F) - 8) * d1;
+                o2[2 * j + 17] = (float)((int)((v2 >> 12) & 0x0F) - 8) * d2;
+                o3[2 * j + 17] = (float)((int)((v3 >> 12) & 0x0F) - 8) * d3;
+            }
+        }
+        LM2GM(dst, out + c * CHUNK_OUT, CHUNK_OUT * 4);
+    }
+}
