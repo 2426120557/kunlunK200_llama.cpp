@@ -1,0 +1,1720 @@
+diff --git a/.gitmodules b/.gitmodules
+index d03f7c213..88c3648c7 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,3 +1,3 @@
+ [submodule "vendor/KunlunK200"]
+ 	path = vendor/KunlunK200
+-	url = git@github.com:UnagiDojyou/kunlunK200_lib.git
++	url = https://github.com/UnagiDojyou/kunlunK200_lib.git
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index d8afd4095..651793866 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -2020,6 +2020,14 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
+     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+         auto & sinfo = sinfos[seq_id];
+ 
++        /* K200: the ngram table is shared and was never cleared between
++           requests, so drafts from earlier turns leaked into later ones. */
++        static const bool reset_on_begin = [] {
++            const char * e = std::getenv("KUNLUN_NGRAM_RESET_BEGIN");
++            return !e || e[0] != '0';   // default ON
++        }();
++        if (reset_on_begin && seq_id == 0) mod.reset();
++
+         sinfo.i_last = 0;
+         sinfo.n_draft_last = 0;
+ 
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index eaa2a44da..ca2260c00 100644
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -11,6 +11,10 @@
+ 
+ #include "ggml-backend.h"
+ #include "ggml-backend-impl.h"
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <cstdlib>
+ #include "ggml-alloc.h"
+ #include "ggml-impl.h"
+ 
+@@ -1876,10 +1880,73 @@ static void ggml_backend_sched_copy_input(ggml_backend_sched_t sched, struct ggm
+     }
+ }
+ 
++/* ---- K200_SPLIT_TIME: where does the scheduler time actually go ---- */
++static bool k200_split_time_on() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("K200_SPLIT_TIME"); v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v != 0;
++}
++struct K200SplitAcc {
++    double total = 0, copies = 0, syncs = 0, compute = 0;
++    size_t calls = 0, splits = 0;
++    /* per split-backend: how many splits, how many nodes, how long */
++    size_t be_splits[8] = {0}, be_nodes[8] = {0};
++    double be_ms[8] = {0};
++    const char * be_name[8] = {nullptr};
++};
++static K200SplitAcc g_k200_split;
++static void k200_split_dump() {
++    auto & a = g_k200_split;
++    if (!a.calls) return;
++    std::fprintf(stderr,
++        "K200SPLIT FINAL calls=%zu splits=%zu total=%.1f ms copies=%.1f ms syncs=%.1f ms backend=%.1f ms other=%.1f ms\n",
++        a.calls, a.splits, a.total, a.copies, a.syncs, a.compute, a.total - a.copies - a.syncs - a.compute);
++    std::fprintf(stderr, "K200SPLIT FINAL per-call: total=%.3f ms splits=%.1f backend=%.3f ms other=%.3f ms\n",
++        a.total / a.calls, (double) a.splits / a.calls, a.compute / a.calls,
++        (a.total - a.copies - a.syncs - a.compute) / a.calls);
++    for (int i = 0; i < 8; ++i) {
++        if (!a.be_splits[i]) continue;
++        std::fprintf(stderr, "K200SPLIT PERBACKEND %s: splits=%zu nodes=%zu total=%.1f ms (per-split %.3f ms)\n",
++            a.be_name[i] ? a.be_name[i] : "?", a.be_splits[i], a.be_nodes[i], a.be_ms[i],
++            a.be_ms[i] / (double) a.be_splits[i]);
++    }
++}
++static inline std::chrono::steady_clock::time_point k200_now() { return std::chrono::steady_clock::now(); }
++static inline double k200_ms(std::chrono::steady_clock::time_point a) {
++    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
++}
++
++/* ---- K200_CPU_OPS: which ops does the scheduler leave on the CPU backend ---- */
++#include <map>
++#include <string>
++static std::map<std::string, std::pair<size_t, size_t>> g_k200_cpu_ops;   /* name -> (count, bytes) */
++static void k200_cpu_ops_dump() {
++    if (g_k200_cpu_ops.empty()) return;
++    std::fprintf(stderr, "K200CPUOPS: %zu distinct ops on CPU\n", g_k200_cpu_ops.size());
++    for (auto & kv : g_k200_cpu_ops) {
++        std::fprintf(stderr, "K200CPUOPS %-24s count=%-6zu bytes=%zu\n",
++                     kv.first.c_str(), kv.second.first, kv.second.second);
++    }
++}
++static bool k200_cpu_ops_on() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("K200_CPU_OPS"); v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v != 0;
++}
++
++static bool a_be_is_cpu(ggml_backend_t b) {
++    const char * n = ggml_backend_name(b);
++    return n && std::strstr(n, "CPU") != nullptr;
++}
++
+ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
+     K200_DIAG_SCOPE(diag,"scheduler","compute_splits");
+     GGML_ASSERT(sched);
+     struct ggml_backend_sched_split * splits = sched->splits;
++    const bool k2_on = k200_split_time_on();
++    auto k2_t0 = k2_on ? k200_now() : std::chrono::steady_clock::time_point{};
++    double k2_copy = 0, k2_sync = 0, k2_comp = 0;
++    if (k2_on && g_k200_split.calls == 0) std::atexit(k200_split_dump);
+ 
+     int prev_backend_id = -1;
+ 
+@@ -1890,6 +1957,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+ 
+         // ensure the previous split's async work has completed before we start
+         // this split, the allocator may have reused buffer regions across splits
++        auto k2_s0 = k2_on ? k200_now() : std::chrono::steady_clock::time_point{};
+         if (split->n_inputs == 0 && prev_backend_id >= 0 && prev_backend_id != split_backend_id) {
+             if (sched->events[prev_backend_id][sched->cur_copy] != NULL) {
+                 ggml_backend_event_synchronize(sched->events[prev_backend_id][sched->cur_copy]);
+@@ -1898,6 +1966,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+             }
+         }
+ 
++        if (k2_on) k2_sync += k200_ms(k2_s0);
++        auto k2_c0 = k2_on ? k200_now() : std::chrono::steady_clock::time_point{};
+         // copy the input tensors to the split backend
+         // the weights in host memory are copied last, so that the copy callback can read the other inputs of the split
+         for (int input_id = 0; input_id < split->n_inputs; input_id++) {
+@@ -1911,6 +1981,8 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+             }
+         }
+ 
++        if (k2_on) k2_copy += k200_ms(k2_c0);
++        auto k2_g0 = k2_on ? k200_now() : std::chrono::steady_clock::time_point{};
+         if (!sched->callback_eval) {
+             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
+             if (ec != GGML_STATUS_SUCCESS) {
+@@ -1950,6 +2022,26 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+             }
+         }
+ 
++        if (k2_on) k2_comp += k200_ms(k2_g0);
++        if (k200_cpu_ops_on() && split_backend_id >= 0 && split_backend_id < 8 &&
++            a_be_is_cpu(split_backend)) {
++            if (g_k200_cpu_ops.empty()) std::atexit(k200_cpu_ops_dump);
++            for (int n = 0; n < split->graph.n_nodes; ++n) {
++                struct ggml_tensor * t = split->graph.nodes[n];
++                if (!t) continue;
++                std::string key = ggml_op_name(t->op);
++                key += " ";
++                key += t->name ? t->name : "?";
++                auto & e = g_k200_cpu_ops[key];
++                e.first++; e.second += ggml_nbytes(t);
++            }
++        }
++        if (k2_on && split_backend_id >= 0 && split_backend_id < 8) {
++            g_k200_split.be_name[split_backend_id] = ggml_backend_name(split_backend);
++            g_k200_split.be_splits[split_backend_id]++;
++            g_k200_split.be_nodes[split_backend_id] += (size_t) split->graph.n_nodes;
++            g_k200_split.be_ms[split_backend_id] += k200_ms(k2_g0);
++        }
+         // record the event of this split
+         if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
+             ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
+@@ -1958,6 +2050,19 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+         prev_backend_id = split_backend_id;
+     }
+ 
++    if (k2_on) {
++        auto & a = g_k200_split;
++        a.calls++; a.splits += (size_t) sched->n_splits;
++        a.copies += k2_copy; a.syncs += k2_sync; a.compute += k2_comp;
++        a.total += k200_ms(k2_t0);
++        if (a.calls % 32 == 0) {
++            std::fprintf(stderr, "K200SPLIT calls=%zu splits=%.1f total=%.3f copies=%.3f syncs=%.3f backend=%.3f other=%.3f ms/call\n",
++                a.calls, (double) a.splits / a.calls, a.total / a.calls, a.copies / a.calls,
++                a.syncs / a.calls, a.compute / a.calls,
++                (a.total - a.copies - a.syncs - a.compute) / a.calls);
++        }
++    }
++
+     return GGML_STATUS_SUCCESS;
+ }
+ 
+diff --git a/ggml/src/ggml-kunlun/ggml-kunlun.cpp b/ggml/src/ggml-kunlun/ggml-kunlun.cpp
+index 4115726d6..394f477c4 100644
+--- a/ggml/src/ggml-kunlun/ggml-kunlun.cpp
++++ b/ggml/src/ggml-kunlun/ggml-kunlun.cpp
+@@ -75,8 +75,9 @@ struct type_context { int id; bool split; double fraction; std::string name; };
+ struct tensor_parts {
+     void * ptr[2] = {};
+     size_t bytes[2] = {}, physical[2] = {};
+-    int rows[2] = {}, k = 0;
+-    bool packed = false, native = false, common = false, q6 = false;
++    int rows[2] = {}, k = 0, n1 = 0;
++    bool packed = false, native = false, common = false, q6 = false, moe = false;
++    bool replicated = false;   /* split buft, but the whole tensor is mirrored on both dies */
+     std::unique_ptr<kunlun::Q6KWeight> q6_weight[2];
+     std::unique_ptr<kunlun::CommonQ4Weight> common_weight[2];
+     std::vector<char> original;
+@@ -136,6 +137,12 @@ struct backend_context {
+     size_t split_x_size = 0, split_y_size = 0;
+     size_t local_y_size = 0;
+     size_t peer_y_size = 0;
++    /* MoE expert matmul scratch (GGML_OP_MUL_MAT_ID) */
++    void * mid_x = nullptr;
++    void * mid_y = nullptr;
++    size_t mid_x_size = 0;
++    size_t mid_y_size = 0;
++    size_t mid_calls = 0, mid_gemv = 0, mid_grouped = 0;
+ };
+ 
+ ggml_backend_device devices[2];
+@@ -151,27 +158,151 @@ buffer_context * buffer_of(const ggml_tensor * t) {
+ }
+ bool q6_enabled(){const char*s=std::getenv("KUNLUN_Q6_K_SDNN");return !s||!std::strcmp(s,"1");}
+ bool use_q6(const ggml_tensor*t){return q6_enabled()&&t->type==GGML_TYPE_Q6_K&&!t->view_src&&ggml_is_matrix(t)&&ggml_is_contiguous(t)&&(t->ne[0]==2048||t->ne[0]==4096)&&t->ne[1]==32000;}
++// 按层强制 int8：GGML_KUNLUN_I8_FORCE_BLK=N -> blk 号 < N 的层走 int8，其余保持 Q4。
++// 用于在 16GB 卡上腾显存给投机 draft（Q4 层慢但省 45% 空间）。
++static int i8_force_blk() {
++    static int v = -2;
++    if (v == -2) {
++        const char * e = std::getenv("GGML_KUNLUN_I8_FORCE_BLK");
++        v = e ? std::atoi(e) : -1;
++    }
++    return v;
++}
++static bool i8_forced(const ggml_tensor * t) {
++    const int n = i8_force_blk();
++    if (n < 0 || t->name == nullptr) return false;
++    const char * f = std::strstr(t->name, "blk.");
++    if (f == nullptr) return false;
++    const int idx = std::atoi(f + 4);
++    return idx >= 0 && idx < n;
++}
++
++
++/* Diagnostic only: qwen2.5-7B ffn_down has K=18944, above common-q4's 16384
++   limit, so it silently falls back to the CDNN slow path.  With
++   KUNLUN_I8_FORCE_DOWN=1 we route just that tensor (K>16384, name contains
++   ffn_down) through the vendor W8/int8 path instead. */
++static bool i8_force_down(const ggml_tensor * t) {
++    static int v = -2;
++    if (v == -2) {
++        const char * e = std::getenv("KUNLUN_I8_FORCE_DOWN");
++        v = (e && std::strcmp(e, "1") == 0) ? 1 : 0;
++    }
++    if (!v || t->type != GGML_TYPE_Q4_0 || t->name == nullptr) return false;
++    if (t->ne[0] <= 16384 || !std::strstr(t->name, "ffn_down")) return false;
++    static int logged = 0;
++    if (logged++ < 4)
++        std::fprintf(stderr, "[FFNDOWN] force W8: %s K=%lld N=%lld\n",
++                     t->name, (long long)t->ne[0], (long long)t->ne[1]);
++    return true;
++}
++// KUNLUN_I8_FORCE_NMIN=n: 让 N>=n 的张量优先走 W8/SDNN 而不是 common-Q4(int4)。
++// 必须在这里拦，因为 get_alloc_size 的判定顺序是 use_common → use_i8。
++static bool i8_force_nmin(const ggml_tensor * t) {
++    static int v = -2;
++    if (v == -2) { const char * e = std::getenv("KUNLUN_I8_FORCE_NMIN"); v = e ? std::atoi(e) : 0; }
++    if (v <= 0 || t->type != GGML_TYPE_Q4_0) return false;
++    return t->ne[1] >= v;
++}
++// KUNLUN_I8_FORCE_NMAX=n: 让 N<=n 的小矩阵走 W8/SDNN，N 大的留在 common-Q4(int4)。
++// 小矩阵在 int4 上的 DS/sync 固定开销占比高，转 int8 收益最大；大矩阵能摊薄，留 int4 省显存。
++static bool i8_force_nmax(const ggml_tensor * t) {
++    static int v = -2;
++    if (v == -2) { const char * e = std::getenv("KUNLUN_I8_FORCE_NMAX"); v = e ? std::atoi(e) : 0; }
++    if (v <= 0 || t->type != GGML_TYPE_Q4_0) return false;
++    return t->ne[1] <= v;
++}
+ bool use_common(const ggml_tensor * t) {
++    if (i8_forced(t)) return false;
++    if (i8_force_down(t)) return false;
++    if (i8_force_nmin(t)) return false;
++    if (i8_force_nmax(t)) return false;
+     return common_enabled() && t->type==GGML_TYPE_Q4_0 && ggml_is_matrix(t) && ggml_is_contiguous(t) && !t->view_src &&
+         t->ne[0]%32==0 && t->ne[0]<=INT_MAX && t->ne[1]<=INT_MAX && kunlun::common_q4_supported(t->ne[0],t->ne[1]);
+ }
+ bool use_native(const ggml_tensor * t) {
++    if (i8_force_down(t)) return false;
+     const char * setting=std::getenv("GGML_KUNLUN_NATIVE_Q4");
+     return !use_common(t) && setting && std::strcmp(setting,"1") == 0 && t->type == GGML_TYPE_Q4_0 &&
+         ggml_is_matrix(t) && ggml_is_contiguous(t) && !t->view_src &&
+         t->ne[0] <= INT_MAX && t->ne[1] <= INT_MAX &&
+         kunlun::native_q4_layout_supported(t->ne[0],t->ne[1]);
+ }
++static bool moe_native_on() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("KUNLUN_MOE_NATIVE_Q4"); v = (e && std::strcmp(e,"1")==0) ? 1 : 0; }
++    return v == 1;
++}
++bool use_native_expert(const ggml_tensor * t) {
++    if (!moe_native_on()) return false;
++    if (t->type != GGML_TYPE_Q4_0 || t->view_src || !ggml_is_contiguous(t)) return false;
++    if (t->ne[3] != 1 || t->ne[2] <= 1) return false;
++    if (t->ne[0] <= 0 || t->ne[0] > 16384 || t->ne[0] % 32 != 0) return false;
++    if (t->ne[1] <= 0 || t->ne[1] > 16384) return false;
++    return kunlun::native_q4_layout_supported((int)t->ne[0],(int)t->ne[1]);
++}
++size_t native_expert_size(int k, int n, int e) {
++    size_t per = kunlun::native_q4_size(k,n);
++    return per ? per*(size_t)e : 0;
++}
++bool use_i8_expert(const ggml_tensor * t) {
++    if (use_native_expert(t)) return false;
++    const char * s = std::getenv("KUNLUN_MOE_I8");
++    if (s && std::strcmp(s, "0") == 0) return false;
++    if (t->type != GGML_TYPE_Q4_0 || t->view_src || !ggml_is_contiguous(t)) return false;
++    if (t->ne[3] != 1 || t->ne[2] <= 1) return false;
++    if (t->ne[0] <= 0 || t->ne[0] > 16384 || t->ne[0] % 32 != 0) return false;
++    const int64_t rows = t->ne[1] * t->ne[2];
++    return rows > 0 && t->ne[1] > 0 && t->ne[0] * rows < INT_MAX;
++}
++/* the vendor gemm_int8 path is not limited to K<=16384 (verified up to 18944, 124 GB/s) */
++static const int KMAX_I8 = 65536;
++/* KUNLUN_SELF_SPLIT=1: the backend mirrors half the int8 rows onto the other die,
++   so the device llama.cpp allocates for only needs room for its own half. */
++static bool self_split_on() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("KUNLUN_SELF_SPLIT");
++                 v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v == 1;
++}
++static int i8_force_kmin() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("KUNLUN_I8_FORCE_KMIN"); v = e ? std::atoi(e) : 0; }
++    return v;
++}
++// FAKE 探针：跳过一半 ADD 的派发（结果会错，只量「砍掉 N 次 launch」的 perf 上界）。
++// 等价于「把 3 个 bias add 合成 1 个」这类子图合并的收益上限。
++static bool fake_skip_add() {
++    static const int on = [] { const char * e = std::getenv("KUNLUN_FAKE_SKIP_ADD"); return e && e[0]=='1' ? 1 : 0; }();
++    static int n = 0;
++    if (!on) return false;
++    return (n++ & 1) == 0;
++}
+ bool use_i8(const ggml_tensor * t) {
++    if (use_i8_expert(t)) return true;
+     const char * setting = std::getenv("GGML_KUNLUN_REQUANT_I8");
+-    return !use_common(t) && !use_native(t) && setting && std::strcmp(setting,"0") != 0 && t->type == GGML_TYPE_Q4_0 && ggml_is_matrix(t) && !t->view_src &&
+-        t->ne[0] > 0 && t->ne[0] <= 16384 && t->ne[0]%32 == 0 && t->ne[1] > 0 && t->ne[1] <= INT_MAX/t->ne[0];
++    /* KUNLUN_I8_FORCE_KMIN=k: force tensors with K>=k to W8 even when
++       common-Q4 (int4) would take them. Lets one process run a W8 target
++       (K=3584) with an int4 draft (K=896). Default 0 = off. */
++    const int kmin = i8_force_kmin();
++    static const int nmin = [] { const char * e = std::getenv("KUNLUN_I8_FORCE_NMIN"); return e ? std::atoi(e) : 0; }();
++    const bool force_k = (kmin > 0 && t->ne[0] >= kmin) || (nmin > 0 && t->ne[1] >= nmin);
++    const bool base = (force_k || (!use_common(t) && !use_native(t))) && setting && std::strcmp(setting,"0") != 0 && t->type == GGML_TYPE_Q4_0 && ggml_is_matrix(t) && !t->view_src &&
++        t->ne[0] > 0 && t->ne[0] <= KMAX_I8 && t->ne[0]%32 == 0 && t->ne[1] > 0 && t->ne[1] <= INT_MAX/t->ne[0];
++    if (base) return true;
++    // 强制层：形状本来能被 common-q4 接走，这里改判为 int8
++    if (!i8_forced(t)) return false;
++    return setting && std::strcmp(setting,"0") != 0 && t->type == GGML_TYPE_Q4_0 && ggml_is_matrix(t) && !t->view_src &&
++        t->ne[0] > 0 && t->ne[0] <= KMAX_I8 && t->ne[0]%32 == 0 && t->ne[1] > 0 && t->ne[1] <= INT_MAX/t->ne[0];
+ }
+ size_t packed_size(int k, int n) { return kunlun::packed_i8_size(k,n); }
+ float * scales(tensor_parts * p, int id) { return kunlun::packed_i8_scales(p->ptr[id],p->k,p->rows[id]); }
+ float * maxima(tensor_parts * p, int id) { return kunlun::packed_i8_maxima(p->ptr[id],p->k,p->rows[id]); }
+ 
++static double g_repack_ms = 0;
++static size_t g_repack_calls = 0, g_repack_rows = 0;
+ void repack(tensor_parts * p, size_t first, size_t last) {
++    const auto rp_t0 = std::chrono::steady_clock::now();
+     size_t row_bytes=ggml_row_size(p->q6?GGML_TYPE_Q6_K:GGML_TYPE_Q4_0,p->k), start=0;
+     for (int id=0;id<2;++id) {
+         size_t lo=std::max(first,start), hi=std::min(last,start+p->rows[id]);
+@@ -192,6 +323,13 @@ void repack(tensor_parts * p, size_t first, size_t last) {
+         if (p->native) {
+             if (hi > lo) {
+                 auto begin=std::chrono::steady_clock::now();
++                if (p->moe && p->n1 > 0) {
++                    const size_t per=kunlun::native_q4_size(p->k,p->n1);
++                    const size_t src_per=(size_t)p->n1*row_bytes;
++                    const size_t E=(size_t)p->rows[id]/(size_t)p->n1;
++                    for (size_t e=0;e<E;++e)
++                        kunlun::upload_native_q4(id,(char*)p->ptr[id]+e*per,p->original.data()+start*src_per+e*src_per,p->k,p->n1);
++                } else
+                 kunlun::upload_native_q4(id,p->ptr[id],p->original.data()+start*row_bytes,p->k,p->rows[id]);
+                 ++native_uploads[id]; native_upload_bytes[id]+=p->physical[id];
+                 native_upload_ns[id]+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-begin).count();
+@@ -209,6 +347,18 @@ void repack(tensor_parts * p, size_t first, size_t last) {
+         }
+         start+=p->rows[id];
+     }
++    if (p->moe && !p->original.empty() && last >= (size_t)(p->rows[0]+p->rows[1])) {
++        std::vector<char>().swap(p->original);
++    }
++    if (p->packed) {
++        g_repack_ms += std::chrono::duration<double,std::milli>(
++            std::chrono::steady_clock::now() - rp_t0).count();
++        g_repack_calls++; g_repack_rows += last - first;
++        const char * rs = std::getenv("KUNLUN_REPACK_TIMING");
++        if (rs && std::strcmp(rs, "0") != 0 && g_repack_calls % 20 == 0)
++            std::fprintf(stderr, "[I8REPACK_TIMING] calls=%zu rows=%zu total=%.1f ms avg=%.2f ms/call\n",
++                         g_repack_calls, g_repack_rows, g_repack_ms, g_repack_ms / (double) g_repack_calls);
++    }
+ }
+ 
+ void transfer(ggml_backend_buffer_t buf, const ggml_tensor * t, void * data, size_t off, size_t size, bool put) {
+@@ -238,6 +388,18 @@ void transfer(ggml_backend_buffer_t buf, const ggml_tensor * t, void * data, siz
+     auto * parts = (tensor_parts *)root->extra;
+     GGML_ASSERT(parts);
+     off += (uintptr_t)t->data - (uintptr_t)root->data;
++    if (parts->replicated) {
++        GGML_ASSERT(off + size <= ggml_nbytes(root));
++        for (int d = 0; d < 2; ++d) {
++            if (!parts->ptr[d]) continue;
++            select(d);
++            void * addr = (char *)parts->ptr[d] + off;
++            check(put ? kunlun::copy(addr, data, size, kunlun::host_to_device)
++                      : kunlun::copy(data, addr, size, kunlun::device_to_host));
++            check(kunlun::wait());
++        }
++        return;
++    }
+     GGML_ASSERT(off <= ggml_nbytes(root) && size <= ggml_nbytes(root)-off);
+     size_t start = 0;
+     for (int d = 0; d < 2; ++d) {
+@@ -328,17 +490,127 @@ void launch_mv(backend_context * ctx, int id, void * y, const void * w, const vo
+ }
+ int kernel_type(enum ggml_type t) { return t == GGML_TYPE_Q6_K ? 4 : t == GGML_TYPE_Q4_0 ? 2 : t == GGML_TYPE_F16 ? 1 : 0; }
+ 
++/* ---- row-split phase profile (KUNLUN_SPLIT_PROFILE=1) ---- */
++/* ---- lean-compute switches (perf experiments) ---- */
++static bool lean_skip(const char * name) {
++    const char * e = std::getenv(name);
++    return e && std::strcmp(e, "0") != 0;
++}
++static bool lean_kvmax()  { static int v = -1; if (v < 0) v = lean_skip("KUNLUN_LEAN_KVMAX") ? 1 : 0; return v; }
++static bool lean_diag()   { static int v = -1; if (v < 0) v = lean_skip("KUNLUN_LEAN_DIAG")  ? 1 : 0; return v; }
++static bool lean_actw()   { static int v = -1; if (v < 0) v = lean_skip("KUNLUN_LEAN_ACTW")  ? 1 : 0; return v; }
++
++/* ---- K200_GC_TIME: where inside one backend graph_compute call does the time go ---- */
++struct K200GcAcc { double lock = 0, scopes = 0, loop = 0, tail = 0, total = 0; size_t calls = 0; };
++static K200GcAcc g_k200gc[2];
++static void k200_gc_dump() {
++    for (int i = 0; i < 2; ++i) {
++        auto & a = g_k200gc[i];
++        if (!a.calls) continue;
++        std::fprintf(stderr,
++            "K200GC PD%d calls=%zu per-call: total=%.3f lock=%.3f scopes=%.3f loop=%.3f tail=%.3f ms\n",
++            i, a.calls, a.total / a.calls, a.lock / a.calls, a.scopes / a.calls, a.loop / a.calls, a.tail / a.calls);
++    }
++}
++static bool k200_gc_time() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("K200_GC_TIME"); v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v != 0;
++}
++
++static bool k200_nop_loop() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("K200_NOP_LOOP"); v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v != 0;
++}
++static bool vec_replicate_on() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("GGML_KUNLUN_VEC_REPLICATE"); v = (e && std::strcmp(e, "1") == 0) ? 1 : 0; }
++    return v != 0;
++}
++/* split-buffer vector: the data lives on both dies, so a GPU op may read it directly */
++static const void * src_data(backend_context * ctx, const ggml_tensor * t) {
++    if (!t) return nullptr;
++    const ggml_tensor * root = t;
++    while (root->view_src) root = root->view_src;
++    auto * parts = (tensor_parts *) root->extra;
++    if (parts && parts->replicated && parts->ptr[ctx->id]) return parts->ptr[ctx->id];
++    return t->data;
++}
++
++static bool k200_skip_mm() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("K200_SKIP_MM"); v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v != 0;
++}
++static bool k200_skip_nonmm() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("K200_SKIP_NONMM"); v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v != 0;
++}
++
++static bool split_profile_enabled() {
++    const char * e = std::getenv("KUNLUN_SPLIT_PROFILE");
++    return e && std::strcmp(e, "0") != 0;
++}
++struct SplitPhase { double peer=0, launch=0, wother=0, wmain=0, gather=0; size_t n=0; };
++static SplitPhase g_sp[2];
++struct SplitPhaseGuard {
++    bool on = false;
++    int id = 0;
++    std::chrono::steady_clock::time_point t0;
++    double peer=0, launch=0, wother=0, wmain=0;
++    static double ms_since(const std::chrono::steady_clock::time_point & t) {
++        return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now() - t).count();
++    }
++    void mark(double & slot) { auto n = std::chrono::steady_clock::now();
++        slot = std::chrono::duration<double,std::milli>(n - t0).count(); t0 = n; }
++    ~SplitPhaseGuard() {
++        if (!on) return;
++        const double tot = ms_since(t0) + peer + launch + wother + wmain;
++        auto & a = g_sp[id];
++        a.peer += peer; a.launch += launch; a.wother += wother; a.wmain += wmain;
++        a.gather += tot - (peer + launch + wother + wmain);
++        a.n++;
++        if (a.n % 100 == 0) {
++            const double sum = a.peer + a.launch + a.wother + a.wmain + a.gather;
++            std::fprintf(stderr,
++              "[SPLIT_PROFILE] pd=%d n=%zu total=%.1f ms | peer=%.1f(%.0f%%) launch=%.1f(%.0f%%) wait_other=%.1f(%.0f%%) wait_main=%.1f(%.0f%%) gather+rest=%.1f(%.0f%%)\n",
++              id, a.n, sum,
++              a.peer,100.0*a.peer/sum, a.launch,100.0*a.launch/sum,
++              a.wother,100.0*a.wother/sum, a.wmain,100.0*a.wmain/sum,
++              a.gather,100.0*a.gather/sum);
++        }
++    }
++};
++
+ void matmul(backend_context * ctx, ggml_tensor * dst) {
++    if (k200_skip_mm()) return;
++    static const bool mm_nowait = [] {
++        const char * e = std::getenv("KUNLUN_MATMUL_NOWAIT"); return e && e[0] == '1'; }();
++    static const bool split_nowait = [] {
++        const char * e = std::getenv("KUNLUN_SPLIT_NOWAIT"); return e && e[0] == '1'; }();
+     ActivationMatmulScope activation_scope(ctx,dst);
+     const auto * w=dst->src[0]; const auto * x=dst->src[1];
+     int k=w->ne[0], n=w->ne[1], batch=x->ne[1];
++    static const bool mm_dump = [] {
++        const char * e = std::getenv("KUNLUN_MATMUL_DUMP"); return e && e[0] == '1'; }();
++    if (mm_dump) {
++        static int printed = 0;
++        if (printed++ < 200) std::fprintf(stderr,
++            "MMDUMP y=%p w=%p x=%p k=%d n=%d batch=%d id=%d\n",
++            dst->data, w->data, x->data, k, n, batch, ctx->id);
++    }
+     auto * wb=buffer_of(w); auto * parts=(tensor_parts *)w->extra;
+     const int main=ctx->id, other=1-main;
+-    if (!wb || !wb->type->split) {
++    SplitPhaseGuard spg;
++    const bool self_split = parts && !(wb && wb->type->split) && parts->rows[0] > 0 && parts->rows[1] > 0;
++    if (!wb || (!wb->type->split && !self_split)) {
+         launch_mv(ctx,main,dst->data,w->data,x->data,k,n,batch,kernel_type(w->type),parts);
+-        check(kunlun::wait()); return;
++        if (!mm_nowait) check(kunlun::wait());
++        return;
+     }
+-    GGML_ASSERT(parts && wb->type->id == main);
++    GGML_ASSERT(parts && (self_split || wb->type->id == main));
+     const int local_rows=parts->rows[main], remote_rows=parts->rows[other];
+     const int local_offset=main ? parts->rows[0] : 0;
+     const int remote_offset=other ? parts->rows[0] : 0;
+@@ -346,6 +618,8 @@ void matmul(backend_context * ctx, ggml_tensor * dst) {
+         launch_mv(ctx,main,dst->data,parts->ptr[main],x->data,k,n,batch,kernel_type(w->type),parts);
+         check(kunlun::wait()); ++split_matmuls; return;
+     }
++    if (split_profile_enabled()) { spg.on = true; spg.id = main;
++        spg.t0 = std::chrono::steady_clock::now(); }
+     size_t xs=(size_t)k*batch*4, ys=(size_t)remote_rows*batch*4;
+     if (ctx->split_x_size < xs) { release(other,ctx->split_x,ctx->split_x_size); ctx->split_x=allocate(other,xs); ctx->split_x_size=xs; }
+     if (ctx->split_y_size < ys) { release(other,ctx->split_y,ctx->split_y_size); ctx->split_y=allocate(other,ys); ctx->split_y_size=ys; }
+@@ -363,11 +637,16 @@ void matmul(backend_context * ctx, ggml_tensor * dst) {
+     if (parts->common && staged && activation_ready(ctx,other,k,batch)) {
+         ++act.peer_saved_calls;act.peer_saved_bytes+=xs;
+     } else peer(other,ctx->split_x,main,x->data,xs);
++    if (spg.on) spg.mark(spg.peer);
+     act.peer_generation=act.use && parts->common ? act.generation : 0;
+     act.peer_pointer=ctx->split_x;act.peer_extent=xs;
+     if (local_rows) launch_mv(ctx,main,local_output,parts->ptr[main],x->data,k,local_rows,batch,kernel_type(w->type),parts);
+     launch_mv(ctx,other,ctx->split_y,parts->ptr[other],ctx->split_x,k,remote_rows,batch,kernel_type(w->type),parts);
+-    select(other); check(kunlun::wait()); select(main); check(kunlun::wait());
++    if (spg.on) spg.mark(spg.launch);
++    if (!split_nowait) { select(other); check(kunlun::wait()); }
++    if (spg.on) spg.mark(spg.wother);
++    if (!split_nowait) { select(main); check(kunlun::wait()); }
++    if (spg.on) spg.mark(spg.wmain);
+     const char * copy_mode=std::getenv("GGML_KUNLUN_ROW_COPY");
+     bool legacy=copy_mode && std::strcmp(copy_mode,"legacy") == 0;
+     if (batch > 1 && !legacy) {
+@@ -449,13 +728,263 @@ void swiglu(backend_context *ctx,ggml_tensor *dst) {
+     if(!ctx->glu_rows[p.rows]++)std::fprintf(stderr,"KUNLUN SwiGLU PD%d: width=%d rows=%d type=%s packed=%d device_resident=1\n",ctx->id,p.width,p.rows,ggml_type_name(dst->type),!b);
+ }
+ 
++static bool scale_has_bias(const ggml_tensor * t) {
++    if (t->op != GGML_OP_SCALE) return false;
++    float bias; std::memcpy(&bias, (const char *)t->op_params + 4, 4);
++    return bias != 0;
++}
++
++void elementwise_scale_bias(backend_context * ctx, ggml_tensor * dst) {
++    float scale, bias;
++    std::memcpy(&scale, dst->op_params, 4);
++    std::memcpy(&bias, (const char *)dst->op_params + 4, 4);
++    int64_t n = ggml_nelements(dst);
++    int width = (int) dst->ne[0];
++    if (width > 16384) {
++        width = 16384;
++        while (width > 1 && (n % width) != 0) width >>= 1;
++    }
++    kunlun::elementwise_bias(ctx->ew, ctx->id, dst->data, src_data(ctx,dst->src[0]), nullptr,
++        n, width, n, kunlun::ElementwiseOp::scale, scale, bias);
++}
++
++void elementwise(backend_context * ctx, ggml_tensor * dst);   // fwd: 见下文定义
++/* ---- ADD 合并（子图合并第一步，KUNLUN_ADD_COALESCE=1 启用）----
++ * decode 图里 q/k/v 的 bias-ADD 与各自的 GEMM 交错出现，ADD_v 与 ADD_k 之间
++ * 只隔一个 MUL_MAT_K 且互不依赖。这里把先到的 ADD 挂起，等下一个形状兼容的
++ * ADD 到来时用一个 kernel 一起算，省一次 launch（实测每次 launch ~30 µs）。
++ * 保守起见：只在 F32 / contiguous / 非原地 的情况下接管；遇到任何读写冲突立刻
++ * 冲刷回原路径。 */
++static bool add_coalesce_enabled() {
++    static const bool v = [] { const char * e = std::getenv("KUNLUN_ADD_COALESCE"); return e && e[0] == '1'; }();
++    return v;
++}
++struct AddCoalesceState { ggml_tensor * pending = nullptr; long fused = 0; };
++static thread_local AddCoalesceState g_addc;
++
++static bool add_describe(ggml_tensor * t, ggml_tensor ** a, ggml_tensor ** b, int * bcast) {
++    if (!t || t->op != GGML_OP_ADD) return false;
++    if (t->type != GGML_TYPE_F32 || !t->data) return false;
++    if (!ggml_is_contiguous(t)) return false;
++    ggml_tensor * s0 = t->src[0], * s1 = t->src[1];
++    if (!s0 || !s1) return false;
++    if (s0->type != GGML_TYPE_F32 || s1->type != GGML_TYPE_F32) return false;
++    if (!ggml_is_contiguous(s0) || !ggml_is_contiguous(s1)) return false;
++    if (t->ne[0] <= 0 || t->ne[0] > 16384) return false;
++    if (s1->data == t->data) return false;   // y==b 不支持（b 可能是广播的 bias）
++    const bool full0 = s0->ne[0] == t->ne[0] && s0->ne[1] == t->ne[1] && s0->ne[2] == t->ne[2] && s0->ne[3] == t->ne[3];
++    const bool full1 = s1->ne[0] == t->ne[0] && s1->ne[1] == t->ne[1] && s1->ne[2] == t->ne[2] && s1->ne[3] == t->ne[3];
++    const bool bias0 = s0->ne[0] == t->ne[0] && s0->ne[1] == 1 && s0->ne[2] == 1 && s0->ne[3] == 1;
++    const bool bias1 = s1->ne[0] == t->ne[0] && s1->ne[1] == 1 && s1->ne[2] == 1 && s1->ne[3] == 1;
++    if (full0 && full1) { *a = s0; *b = s1; *bcast = 0; return true; }
++    if (full0 && bias1) { *a = s0; *b = s1; *bcast = 1; return true; }
++    if (bias0 && full1) { *a = s1; *b = s0; *bcast = 1; return true; }
++    return false;
++}
++
++static void add_flush(backend_context * c) {
++    if (!g_addc.pending) return;
++    ggml_tensor * p = g_addc.pending;
++    g_addc.pending = nullptr;
++    elementwise(c, p);
++}
++
++static ggml_tensor * addc_root(ggml_tensor * t) {
++    while (t && t->view_src) t = t->view_src;
++    return t;
++}
++static bool add_conflicts(const ggml_tensor * tc) {
++    ggml_tensor * p = g_addc.pending;
++    if (!p) return false;
++    ggml_tensor * t = const_cast<ggml_tensor *>(tc);
++    // 纯元数据节点（VIEW/RESHAPE/PERMUTE/TRANSPOSE）不读数据，不算冲突
++    if (t->op == GGML_OP_VIEW || t->op == GGML_OP_RESHAPE || t->op == GGML_OP_PERMUTE ||
++        t->op == GGML_OP_TRANSPOSE || t->op == GGML_OP_NONE) return false;
++    if (t->data && p->data && t->data == p->data) return true;
++    if (addc_root(t) == p) return true;
++    for (int j = 0; j < GGML_MAX_SRC; ++j) {
++        ggml_tensor * s = t->src[j];
++        if (!s) continue;
++        if (s == p || addc_root(s) == p) return true;
++        // 原地写之后 p 的 buffer 就是 src0 的 buffer，任何读同一 buffer 的节点都得先冲刷。
++        // buffer 复用会带来假冲突，但那只是少合并，不影响正确性。
++        if (s->data && p->data && s->data == p->data) return true;
++    }
++    return false;
++}
++
++// 返回 true = 已接管（挂起或已合并发射），false = 走原路径
++static bool add_offer(backend_context * c, ggml_tensor * t) {
++    ggml_tensor * a = nullptr, * b = nullptr; int bc = 0;
++    if (!add_describe(t, &a, &b, &bc)) {
++        if (std::getenv("KUNLUN_ADD_COALESCE_DEBUG")) { static int r_=0; if (r_++<6)
++            std::fprintf(stderr, "ADDC reject op=%d ty=%d ne=%d,%d,%d cont=%d s0=%d s1=%d%c",
++                (int)t->op, (int)t->type, (int)t->ne[0], (int)t->ne[1], (int)t->ne[2],
++                (int)ggml_is_contiguous(t),
++                t->src[0] ? (int)t->src[0]->type : -1, t->src[1] ? (int)t->src[1]->type : -1, 10); }
++        add_flush(c); return false;
++    }
++    if (!g_addc.pending) { g_addc.pending = t; return true; }
++    ggml_tensor * p = g_addc.pending;
++    ggml_tensor * pa = nullptr, * pb = nullptr; int pbc = 0;
++    if (!add_describe(p, &pa, &pb, &pbc)) { add_flush(c); return false; }
++    g_addc.pending = nullptr;
++    // 诊断开关：同一套挂起调度，但用原 kernel 分两次发。用来二分「调度 bug vs 新 kernel bug」。
++    static const bool split_mode = [] {
++        const char * e = std::getenv("KUNLUN_ADD_COALESCE_SPLIT"); return e && e[0] == '1'; }();
++    if (std::getenv("KUNLUN_ADD_COALESCE_DEBUG")) { static int q_=0; if (q_++<3)
++        std::fprintf(stderr, "ADDC pair y0=%p a0=%p b0=%p r0=%d w0=%d bc0=%d | y1=%p a1=%p b1=%p r1=%d w1=%d bc1=%d%c",
++            p->data, src_data(c, pa), src_data(c, pb),
++            (int)(p->ne[1]*p->ne[2]*p->ne[3]), (int)p->ne[0], pbc,
++            t->data, src_data(c, a), src_data(c, b),
++            (int)(t->ne[1]*t->ne[2]*t->ne[3]), (int)t->ne[0], bc, 10); }
++    if (split_mode) {
++        elementwise(c, p);
++        elementwise(c, t);
++    } else {
++        kunlun::elementwise_add2(c->ew, c->id,
++            p->data, src_data(c, pa), src_data(c, pb),
++            (int) (p->ne[1] * p->ne[2] * p->ne[3]), (int) p->ne[0], pbc,
++            t->data, src_data(c, a), src_data(c, b),
++            (int) (t->ne[1] * t->ne[2] * t->ne[3]), (int) t->ne[0], bc);
++    }
++    g_addc.fused++;
++    return true;
++}
++
++
++/* ---- ADD3：把最多 3 个相邻、互不依赖的 ADD 合成一次 launch ----
++ * 只接管「非原地」的 ADD：host 侧 elementwise() 对 y==a / y==b 会做 alias 快照，
++ * add3 kernel 没有快照；KUNLUN_INPLACE_FAST 已证明省快照会数值错。
++ * KUNLUN_ADD3=1 启用；KUNLUN_ADD3_SPLIT=1 保留挂起调度但用原 kernel 分段发射，
++ * 用来二分「调度 bug」与「新 kernel bug」。 */
++static bool add3_enabled() {
++    static const bool v = [] { const char * e = std::getenv("KUNLUN_ADD3"); return e && e[0] == '1'; }();
++    return v;
++}
++struct Add3State {
++    struct Seg { ggml_tensor * t; ggml_tensor * a; ggml_tensor * b; int bc; };
++    Seg s[3];
++    int n = 0;
++    long seen = 0, eligible = 0, fused = 0, inplace_skips = 0;
++};
++static thread_local Add3State g_add3;
++
++static void add3_flush(backend_context * c) {
++    const int n = g_add3.n;
++    if (!n) return;
++    g_add3.n = 0;
++    static const bool split = [] {
++        const char * e = std::getenv("KUNLUN_ADD3_SPLIT"); return e && e[0] == '1'; }();
++    if (n == 1 || split) {
++        for (int i = 0; i < n; ++i) elementwise(c, g_add3.s[i].t);
++        if (split) g_add3.fused++;
++        return;
++    }
++    void * y[3]        = {nullptr, nullptr, nullptr};
++    const void * a[3]  = {nullptr, nullptr, nullptr};
++    const void * b[3]  = {nullptr, nullptr, nullptr};
++    int r[3]  = {0, 0, 0};
++    int w[3]  = {0, 0, 0};
++    int bc[3] = {0, 0, 0};
++    for (int i = 0; i < n; ++i) {
++        const Add3State::Seg & q = g_add3.s[i];
++        y[i]  = q.t->data;
++        a[i]  = src_data(c, q.a);
++        b[i]  = src_data(c, q.b);
++        r[i]  = (int) (q.t->ne[1] * q.t->ne[2] * q.t->ne[3]);
++        w[i]  = (int) q.t->ne[0];
++        bc[i] = q.bc;
++    }
++    for (int i = n; i < 3; ++i) { y[i] = y[0]; a[i] = a[0]; b[i] = b[0]; }
++    kunlun::elementwise_add3v2(c->ew, c->id,
++        y[0], a[0], b[0], r[0], w[0], bc[0],
++        y[1], a[1], b[1], r[1], w[1], bc[1],
++        y[2], a[2], b[2], r[2], w[2], bc[2]);
++    g_add3.fused++;
++    if (std::getenv("KUNLUN_ADD3_DEBUG")) {
++        static int shown = 0;
++        if (shown++ < 4) std::fprintf(stderr,
++            "ADD3 fused n=%d w=%d/%d/%d rows=%d/%d/%d bc=%d/%d/%d\n",
++            n, w[0], w[1], w[2], r[0], r[1], r[2], bc[0], bc[1], bc[2]);
++    }
++}
++
++static bool add3_conflicts(const ggml_tensor * tc) {
++    if (!g_add3.n) return false;
++    ggml_tensor * t = const_cast<ggml_tensor *>(tc);
++    if (t->op == GGML_OP_VIEW || t->op == GGML_OP_RESHAPE || t->op == GGML_OP_PERMUTE ||
++        t->op == GGML_OP_TRANSPOSE || t->op == GGML_OP_NONE) return false;
++    for (int k = 0; k < g_add3.n; ++k) {
++        ggml_tensor * p = g_add3.s[k].t;
++        /* 只看 tensor 身份 / view 链；data 指针相等在 ggml buffer 复用下几乎必然误报 */
++        if (addc_root(t) == p) return true;
++        for (int j = 0; j < GGML_MAX_SRC; ++j) {
++            ggml_tensor * q = t->src[j];
++            if (!q) continue;
++            if (q == p || addc_root(q) == p) return true;
++        }
++    }
++    return false;
++}
++
++static bool add3_offer(backend_context * c, ggml_tensor * t) {
++    g_add3.seen++;
++    ggml_tensor * a = nullptr, * b = nullptr;
++    int bc = 0;
++    const bool ok = add_describe(t, &a, &b, &bc);
++    const bool inplace = ok && (t->data == a->data || t->data == b->data);
++    if (!ok) { add3_flush(c); return false; }
++    const int rows = (int) (t->ne[1] * t->ne[2] * t->ne[3]);
++    if (rows > 4095 || (int) t->ne[0] > 262143) { add3_flush(c); return false; }
++    if (inplace) g_add3.inplace_skips++;
++    g_add3.eligible++;
++    g_add3.s[g_add3.n++] = {t, a, b, bc};
++    if (g_add3.n == 3) add3_flush(c);
++    return true;
++}
++
+ void elementwise(backend_context * ctx, ggml_tensor * dst) {
+-    const void * a=dst->src[0]->data;
+-    const void * b=dst->src[1] ? dst->src[1]->data : a;
++    const void * a=src_data(ctx,dst->src[0]);
++    const void * b=dst->src[1] ? src_data(ctx,dst->src[1]) : a;
+     int op=dst->op == GGML_OP_ADD ? 0 : dst->op == GGML_OP_MUL ? 1 : dst->op == GGML_OP_RMS_NORM ? 3 : dst->op == GGML_OP_SCALE ? 4 : 2;
+     float parameter=0; std::memcpy(&parameter,dst->op_params,4);
+-    kunlun::elementwise(ctx->ew,ctx->id,dst->data,a,b,ggml_nelements(dst),dst->ne[0],
+-        dst->src[1] ? ggml_nelements(dst->src[1]) : ggml_nelements(dst),(kunlun::ElementwiseOp)op,parameter);
++    int64_t n = ggml_nelements(dst);
++    int width = (int) dst->ne[0];
++    if (width > 16384 && !dst->src[1]) {
++        width = 16384;
++        while (width > 1 && (n % width) != 0) width >>= 1;
++    }
++    kunlun::elementwise(ctx->ew,ctx->id,dst->data,a,b,n,width,
++        dst->src[1] ? ggml_nelements(dst->src[1]) : n,(kunlun::ElementwiseOp)op,parameter);
++}
++
++static void ewcol(backend_context * ctx, ggml_tensor * t) {
++    const int width = (int) t->ne[0];
++    const int rows = (int) (ggml_nelements(t) / width);
++    kunlun::ew_col(ctx->ew, ctx->id, t->data, src_data(ctx, t->src[0]), src_data(ctx, t->src[1]),
++                   rows, width, t->op == GGML_OP_MUL ? 1 : 0);
++}
++
++static void unary_op(backend_context * ctx, ggml_tensor * t) {
++    const enum ggml_unary_op u = ggml_get_unary_op(t);
++    const int op = u == GGML_UNARY_OP_SIGMOID ? 1 : u == GGML_UNARY_OP_SOFTPLUS ? 2 : 3;
++    kunlun::unary(ctx->ew, ctx->id, t->data, src_data(ctx, t->src[0]),
++                  (int) ggml_nelements(t), op);
++}
++
++static void gdn(backend_context * ctx, ggml_tensor * t) {
++    const int64_t S_v = t->src[2]->ne[0];
++    const int64_t H_v = t->src[2]->ne[1];
++    const int64_t H_k = t->src[0]->ne[1];
++    const int n_seqs = (int) t->src[2]->ne[3];
++    const int kda = (t->src[3]->ne[0] == S_v) ? 1 : 0;
++    const float scale = 1.0f / sqrtf((float) S_v);
++    const size_t attn = (size_t) (S_v * H_v * 1 * n_seqs);
++    kunlun::gdn(ctx->ew, ctx->id, t->data, (float *) t->data + attn,
++        src_data(ctx, t->src[0]), src_data(ctx, t->src[1]), src_data(ctx, t->src[2]),
++        src_data(ctx, t->src[3]), src_data(ctx, t->src[4]), src_data(ctx, t->src[5]),
++        (int) S_v, (int) H_v, (int) H_k, n_seqs, kda, scale);
+ }
+ 
+ bool set_rows_layout_supported(const ggml_tensor * dst, const ggml_tensor * src, const ggml_tensor * idx) {
+@@ -631,16 +1160,370 @@ void get_rows_compute(backend_context *ctx,ggml_tensor *t) {
+     }
+ }
+ 
+-bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
++/* ---------------- MoE expert matmul: GGML_OP_MUL_MAT_ID ---------------- */
++/* ---- coarse timing (KUNLUN_GRAPH_TIME=1) ---- */
++static bool graph_time_enabled() {
++    const char * s = std::getenv("KUNLUN_GRAPH_TIME");
++    return s && std::strcmp(s, "0") != 0;
++}
++struct GraphTimeAcc { size_t graphs = 0, nodes = 0; double ms = 0; };
++static GraphTimeAcc graph_time[2];
++static void graph_time_report(int id, size_t n_nodes, double ms) {
++    auto & a = graph_time[id];
++    a.graphs++; a.nodes += n_nodes; a.ms += ms;
++    if (a.graphs % 128 == 0) {
++        std::fprintf(stderr, "KUNLUN graph PD%d: graphs=%zu nodes/graph=%.1f avg=%.3f ms total=%.1f ms\n",
++                     id, a.graphs, (double) a.nodes / (double) a.graphs, a.ms / 128.0, a.ms);
++        a.graphs = 0; a.nodes = 0; a.ms = 0;
++    }
++}
++
++/* ---- per-op timing (KUNLUN_OP_TIME=1) : forces a wait per node, diagnostic only ---- */
++static bool op_time_enabled() {
++    const char * s = std::getenv("KUNLUN_OP_TIME");
++    return s && std::strcmp(s, "0") != 0;
++}
++struct OpTimeAcc { double ms[GGML_OP_COUNT + 1] = {0}; size_t calls[GGML_OP_COUNT + 1] = {0}; size_t n = 0; };
++static OpTimeAcc * op_time[2] = {nullptr, nullptr};
++static void op_time_dump() {
++    for (int id = 0; id < 2; ++id) {
++        auto * a = op_time[id];
++        if (!a || !a->n) continue;
++        double total = 0; for (int j = 0; j <= GGML_OP_COUNT; ++j) total += a->ms[j];
++        std::fprintf(stderr, "KUNLUN OPTIME FINAL PD%d nodes=%zu sum=%.2f ms\n", id, a->n, total);
++        for (int j = 0; j <= GGML_OP_COUNT; ++j) {
++            if (!a->calls[j] || a->ms[j] <= 0) continue;
++            std::fprintf(stderr, "KUNLUN OPTIME PD%d: %-20s calls=%-6zu total=%8.2f ms avg=%6.3f ms\n",
++                         id, ggml_op_name((ggml_op) j), a->calls[j], a->ms[j], a->ms[j] / (double) a->calls[j]);
++        }
++    }
++}
++static void op_time_add(int id, int op, double ms) {
++    if (!op_time[id]) { op_time[id] = new OpTimeAcc(); std::atexit(op_time_dump); }
++    auto & a = *op_time[id];
++    if (op < 0 || op > GGML_OP_COUNT) op = GGML_OP_COUNT;
++    a.ms[op] += ms; a.calls[op]++; a.n++;
++    if (a.n % 500 == 0) {
++        double tmp[GGML_OP_COUNT + 1];
++        std::memcpy(tmp, a.ms, sizeof(tmp));
++        std::fprintf(stderr, "KUNLUN OPTIME PD%d: nodes=%zu (cumulative)\n", id, a.n);
++        for (int k = 0; k < 8; ++k) {
++            int best = -1; double bm = -1;
++            for (int j = 0; j <= GGML_OP_COUNT; ++j) if (tmp[j] > bm) { bm = tmp[j]; best = j; }
++            if (best < 0 || bm <= 0) break;
++            std::fprintf(stderr, "KUNLUN OPTIME PD%d:   %-20s calls=%-6zu total=%8.2f ms avg=%6.3f ms\n",
++                         id, ggml_op_name((ggml_op) best), a.calls[best], bm, bm / (double) a.calls[best]);
++            tmp[best] = -1;
++        }
++    }
++}
++bool mul_mat_id_enabled() {
++    const char * s = std::getenv("KUNLUN_MUL_MAT_ID");
++    return !s || std::strcmp(s, "0") != 0;
++}
++
++bool mul_mat_id_supported(const ggml_tensor * t) {
++    if (!mul_mat_id_enabled()) return false;
++    const auto * w   = t->src[0];
++    const auto * x   = t->src[1];
++    const auto * ids = t->src[2];
++    if (!w || !x || !ids) return false;
++    if (w->type != GGML_TYPE_Q4_0) return false;
++    if (x->type != GGML_TYPE_F32 || t->type != GGML_TYPE_F32) return false;
++    if (ids->type != GGML_TYPE_I32) return false;
++    if (w->ne[3] != 1 || ids->ne[2] != 1 || ids->ne[3] != 1) return false;
++    if (!ggml_is_contiguous(w) || !ggml_is_contiguous(t)) return false;
++    if (t->nb[0] != sizeof(float) || t->nb[1] != sizeof(float) * t->ne[0]) return false;
++    const int64_t k = w->ne[0], n = w->ne[1], E = w->ne[2];
++    if (k <= 0 || k % 32 || k > 16384) return false;
++    if (n <= 0 || n > 16384 || E <= 0) return false;
++    /* one activation row must be contiguous (GEMV input contract) */
++    if (x->nb[0] != sizeof(float) || x->nb[1] != (size_t) k * sizeof(float)) return false;
++    if (x->ne[0] != k) return false;
++    if (ids->ne[1] != x->ne[2]) return false;
++    if (ids->ne[0] % x->ne[1] != 0) return false;
++    return true;
++}
++
++
++/* ---- MoE routing stats (env KUNLUN_MOE_STATS=<path>) : diagnostic only ---- */
++static std::mutex g_moe_mu;
++static unsigned long long g_moe_cnt[64][256];
++static bool g_moe_on = false;
++static bool g_moe_init = false;
++static bool g_moe_warned = false;
++
++static void moe_stats_dump() {
++    const char * path = getenv("KUNLUN_MOE_STATS");
++    if (!path || !*path) return;
++    FILE * f = fopen(path, "w");
++    if (!f) return;
++    for (int l = 0; l < 64; ++l) {
++        unsigned long long tot = 0;
++        for (int e = 0; e < 256; ++e) tot += g_moe_cnt[l][e];
++        if (tot == 0) continue;
++        fprintf(f, "%d %llu", l, tot);
++        for (int e = 0; e < 256; ++e) fprintf(f, " %llu", g_moe_cnt[l][e]);
++        fprintf(f, "\n");
++    }
++    fclose(f);
++}
++
++static inline bool moe_stats_on() {
++    if (!g_moe_init) {
++        g_moe_init = true;
++        const char * p = getenv("KUNLUN_MOE_STATS");
++        if (p && *p) { g_moe_on = true; atexit(moe_stats_dump); }
++    }
++    return g_moe_on;
++}
++
++void mul_mat_id(backend_context * ctx, ggml_tensor * dst) {
++    const auto * w   = dst->src[0];
++    const auto * x   = dst->src[1];
++    const auto * ids = dst->src[2];
++    const int id  = ctx->id;
++    const int k   = (int) w->ne[0];
++    const int n   = (int) w->ne[1];
++    const int E   = (int) w->ne[2];
++    const int S   = (int) ids->ne[0];
++    const int T   = (int) ids->ne[1];
++    const int ne11 = (int) x->ne[1];
++    const size_t nid = (size_t) S * (size_t) T;
++    if (nid == 0 || T <= 0 || ggml_nelements(dst) == 0) return;
++
++    /* ids live on this device normally, but may still sit in a host buffer if
++       the scheduler kept the argmax/topk that produced them on the CPU. */
++    std::vector<int32_t> hid(nid);
++    if (ids->buffer && ggml_backend_buffer_is_host(ids->buffer)) {
++        std::memcpy(hid.data(), ids->data, nid * sizeof(int32_t));
++    } else {
++        check(kunlun::copy(hid.data(), ids->data, nid * sizeof(int32_t), kunlun::device_to_host));
++        check(kunlun::wait());
++    }
++
++    if (moe_stats_on()) {
++        int layer = -1;
++        const char * nm = dst->name;
++        const char * pp = strstr(nm, "blk.");
++        if (pp) {
++            layer = atoi(pp + 4);
++        } else {
++            const char * dash = strrchr(nm, '-');
++            if (dash) layer = atoi(dash + 1);
++        }
++        if (layer >= 0 && layer < 64) {
++            std::lock_guard<std::mutex> lk(g_moe_mu);
++            for (size_t i = 0; i < nid; ++i) {
++                const int e = hid[i];
++                if (e >= 0 && e < 256) g_moe_cnt[layer][e]++;
++            }
++        } else if (!g_moe_warned) {
++            g_moe_warned = true;
++            fprintf(stderr, "MOE_STATS: cannot parse layer from '%s'\n", nm);
++        }
++    }
++    std::vector<int32_t> head((size_t) E, -1), next(nid, -1);
++    for (int t = 0; t < T; ++t) {
++        for (int s = 0; s < S; ++s) {
++            const int e = hid[(size_t) s + (size_t) t * S];
++            if (e < 0 || e >= E) continue;
++            const int idx = s + t * S;
++            next[(size_t) idx] = head[(size_t) e];
++            head[(size_t) e] = idx;
++        }
++    }
++
++    /* ---- W8 experts: vendor gemm_int8 path ----
++       One gemm_int8 + rowwise scale per (slot, token). Measured 19 us/call vs
++       ~1.3 ms for the self-written Q4 kernel, which is what makes decode viable. */
++    const auto * wparts = (const tensor_parts *) w->extra;
++    if (wparts && wparts->native && wparts->ptr[id]) {
++        const size_t per = kunlun::native_q4_size(k, n);
++        const char * base = (const char *) wparts->ptr[id];
++        static bool moe_native_logged[2] = {false, false};
++        size_t accel = 0, calls = 0;
++        for (int t = 0; t < T; ++t) {
++            for (int s = 0; s < S; ++s) {
++                const int e = hid[(size_t) s + (size_t) t * S];
++                if (e < 0 || e >= E) continue;
++                const int i11 = s % ne11;
++                void * dstc = (char *) dst->data + (size_t) s * dst->nb[1] + (size_t) t * dst->nb[2];
++                const void * xsrc = (const char *) x->data + (size_t) i11 * x->nb[1] + (size_t) t * x->nb[2];
++                if (kunlun::native_q4_matmul(ctx->native[id], id, dstc, base + (size_t) e * per, xsrc, k, n, 1)) ++accel;
++                ++calls;
++            }
++        }
++        if (!moe_native_logged[id]) { moe_native_logged[id] = true;
++            std::fprintf(stderr,"KUNLUN MoE native Q4: PD%d K=%d N=%d E=%d per_expert=%zu accel=%zu/%zu\n",id,k,n,E,per,accel,calls); }
++        return;
++    }
++    if (wparts && wparts->packed && wparts->ptr[id]) {
++        const char * base = (const char *) wparts->ptr[id];
++        const float * allsc = kunlun::packed_i8_scales(wparts->ptr[id], k, (int) wparts->rows[id]);
++        const size_t per = (size_t) n * (size_t) k;
++        for (int t = 0; t < T; ++t) {
++            for (int s = 0; s < S; ++s) {
++                const int e = hid[(size_t) s + (size_t) t * S];
++                if (e < 0 || e >= E) continue;
++                const int i11 = s % ne11;
++                void * dstc = (char *) dst->data + (size_t) s * dst->nb[1] + (size_t) t * dst->nb[2];
++                const void * xsrc = (const char *) x->data + (size_t) i11 * x->nb[1] + (size_t) t * x->nb[2];
++                if (!kunlun::moe_i8_matmul(id, dstc, base + (size_t) e * per,
++                                           allsc + (size_t) e * (size_t) n, xsrc, k, n)) {
++                    GGML_ABORT("MUL_MAT_ID %s: gemm_int8 expert call failed on PD%d", dst->name, id);
++                }
++            }
++        }
++        check(kunlun::wait());
++        if (!ctx->mid_calls++) {
++            std::fprintf(stderr, "KUNLUN MUL_MAT_ID PD%d: K=%d N=%d E=%d S=%d T=%d int8=gemm_int8\n",
++                         id, k, n, E, S, T);
++        }
++        return;
++    }
++
++    /* how many tokens want the same expert (decode: usually 1) */
++    int maxc = 1;
++    for (int e = 0; e < E; ++e) {
++        int c = 0;
++        for (int p = head[(size_t) e]; p >= 0; p = next[(size_t) p]) ++c;
++        if (c > maxc) maxc = c;
++    }
++    if (maxc > 1) {
++        const size_t xs = (size_t) k * (size_t) maxc * sizeof(float);
++        const size_t ys = (size_t) n * (size_t) maxc * sizeof(float);
++        if (ctx->mid_x_size < xs) { release(id, ctx->mid_x, ctx->mid_x_size); ctx->mid_x = allocate(id, xs); ctx->mid_x_size = xs; }
++        if (ctx->mid_y_size < ys) { release(id, ctx->mid_y, ctx->mid_y_size); ctx->mid_y = allocate(id, ys); ctx->mid_y_size = ys; }
++        GGML_ASSERT(ctx->mid_x && ctx->mid_y);
++    }
++
++    const int kt = kernel_type(w->type); /* 2 == Q4_0 */
++    const bool mtime = graph_time_enabled();
++    const auto mtime_t0 = std::chrono::steady_clock::now();
++    static size_t mtime_calls = 0; static double mtime_ms = 0;
++    for (int e = 0; e < E; ++e) {
++        if (head[(size_t) e] < 0) continue;
++        void * wsrc = (char *) w->data + (size_t) e * w->nb[2];
++        int c = 0;
++        for (int p = head[(size_t) e]; p >= 0; p = next[(size_t) p]) ++c;
++
++        if (c == 1) {
++            const int idx = head[(size_t) e];
++            const int s = idx % S, t = idx / S;
++            const int i11 = s % ne11;
++            void * dstc = (char *) dst->data + (size_t) s * dst->nb[1] + (size_t) t * dst->nb[2];
++            const void * xsrc = (const char *) x->data + (size_t) i11 * x->nb[1] + (size_t) t * x->nb[2];
++            launch_mv(ctx, id, dstc, wsrc, xsrc, k, n, 1, kt, nullptr);
++            ++ctx->mid_gemv;
++            continue;
++        }
++
++        int j = 0;
++        for (int p = head[(size_t) e]; p >= 0; p = next[(size_t) p], ++j) {
++            const int s = p % S, t = p / S;
++            const int i11 = s % ne11;
++            const void * src = (const char *) x->data + (size_t) i11 * x->nb[1] + (size_t) t * x->nb[2];
++            check(kunlun::copy((char *) ctx->mid_x + (size_t) j * k * sizeof(float), src,
++                               (size_t) k * sizeof(float), kunlun::device_to_device));
++        }
++        check(kunlun::wait());
++        launch_mv(ctx, id, ctx->mid_y, wsrc, ctx->mid_x, k, n, c, kt, nullptr);
++        check(kunlun::wait());
++        j = 0;
++        for (int p = head[(size_t) e]; p >= 0; p = next[(size_t) p], ++j) {
++            const int s = p % S, t = p / S;
++            void * dstc = (char *) dst->data + (size_t) s * dst->nb[1] + (size_t) t * dst->nb[2];
++            check(kunlun::copy(dstc, (char *) ctx->mid_y + (size_t) j * n * sizeof(float),
++                               (size_t) n * sizeof(float), kunlun::device_to_device));
++        }
++        check(kunlun::wait());
++        ++ctx->mid_grouped;
++    }
++    check(kunlun::wait());
++    if (mtime) {
++        mtime_ms += std::chrono::duration<double, std::milli>(
++            std::chrono::steady_clock::now() - mtime_t0).count();
++        if (++mtime_calls % 320 == 0) {
++            std::fprintf(stderr, "KUNLUN MUL_MAT_ID PD%d: calls=%zu avg=%.3f ms total=%.1f ms gemv=%zu grouped=%zu\n",
++                         id, mtime_calls, mtime_ms / 320.0, mtime_ms, ctx->mid_gemv, ctx->mid_grouped);
++            mtime_ms = 0;
++        }
++    }
++    if (!ctx->mid_calls++) {
++        std::fprintf(stderr, "KUNLUN MUL_MAT_ID PD%d: K=%d N=%d E=%d S=%d T=%d maxc=%d\n",
++                     id, k, n, E, S, T, maxc);
++    }
++}
++
++void cpy(backend_context * ctx, ggml_tensor * dst) {
++    (void) ctx;
++    const auto * src = dst->src[0];
++    const size_t n = ggml_nbytes(dst);
++    if (!n || !src->data || !dst->data) return;
++    check(kunlun::copy(dst->data, src->data, n, kunlun::device_to_device));
++    check(kunlun::wait());
++}
++
++static bool supports_op_impl(ggml_backend_dev_t, const ggml_tensor * t) {
+     if (t->op == GGML_OP_NONE || t->op == GGML_OP_VIEW || t->op == GGML_OP_RESHAPE || t->op == GGML_OP_TRANSPOSE || t->op == GGML_OP_PERMUTE) return true;
+     const auto * a = t->src[0]; const auto * b = t->src[1];
+     for (const auto * src : t->src) {
+         if (src) {
+             auto * buf = buffer_of(src);
+-            if (buf && buf->type->split && (t->op != GGML_OP_MUL_MAT || (src != a && buf->size != 0))) return false;
++            if (buf && buf->type->split) {
++                const ggml_tensor * root = src;
++                while (root->view_src) root = root->view_src;
++                auto * parts = (tensor_parts *) root->extra;
++                const bool replicated = parts && parts->replicated;
++                if (!replicated && ((t->op != GGML_OP_MUL_MAT && t->op != GGML_OP_GATED_DELTA_NET) ||
++                                    (src != a && buf->size != 0))) return false;
++            }
+         }
+     }
+     if (!a) return false;
++    if (t->op == GGML_OP_GATED_DELTA_NET) {
++        static const bool gdn_off = [] { const char * e = std::getenv("KUNLUN_GDN_OFF"); return e && e[0] == '1'; }();
++        if (gdn_off) return false;
++        const ggml_tensor * q  = t->src[0];
++        const ggml_tensor * k  = t->src[1];
++        const ggml_tensor * v  = t->src[2];
++        const ggml_tensor * g  = t->src[3];
++        const ggml_tensor * be = t->src[4];
++        const ggml_tensor * st = t->src[5];
++        if (!q || !k || !v || !g || !be || !st) return false;
++        /* 只接管 decode（n_tokens==1）；prompt 仍走 CPU。 */
++        if (v->ne[2] != 1) return false;
++        if (ggml_get_op_params_i32(t, 0) != 1) return false;   /* 只要 K==1 快照 */
++        if (t->type != GGML_TYPE_F32 || v->type != GGML_TYPE_F32 || st->type != GGML_TYPE_F32) return false;
++        if (!ggml_is_contiguous(t) || !ggml_is_contiguous(v) || !ggml_is_contiguous(st) ||
++            !ggml_is_contiguous(q) || !ggml_is_contiguous(k) ||
++            !ggml_is_contiguous(g) || !ggml_is_contiguous(be)) return false;
++        const int64_t S_v = v->ne[0];
++        if (S_v <= 0 || S_v > 256) return false;
++        if (v->ne[1] <= 0 || v->ne[3] <= 0) return false;
++        if (q->ne[1] <= 0 || v->ne[1] % q->ne[1] != 0) return false;
++        if (g->ne[0] != 1 && g->ne[0] != S_v) return false;
++        if (be->ne[0] != 1) return false;
++        return true;
++    }
++    if (t->op == GGML_OP_CPY) {
++        const bool ok = a->type == t->type && ggml_is_contiguous(t) && ggml_is_contiguous(a) &&
++                        ggml_nbytes(t) == ggml_nbytes(a);
++        if (!ok) {
++            static bool once = false;
++            if (!once && std::getenv("GGML_KUNLUN_DIAGNOSTICS")) {
++                once = true;
++                std::fprintf(stderr, "[CPY] rejected name=%s ttype=%d atype=%d ct=%d ca=%d nbt=%zu nba=%zu ne=%lld/%lld\n",
++                             t->name, (int) t->type, (int) a->type, (int) ggml_is_contiguous(t),
++                             (int) ggml_is_contiguous(a), ggml_nbytes(t), ggml_nbytes(a),
++                             (long long) t->ne[0], (long long) t->ne[1]);
++            }
++        }
++        (void) ok;
++        return a->type == t->type;
++    }
++    if (t->op == GGML_OP_MUL_MAT_ID) return mul_mat_id_supported(t);
+     if(t->op==GGML_OP_GET_ROWS)return get_rows_supported(t);
+     if(t->op==GGML_OP_FLASH_ATTN_EXT){
+         kunlun::Flash4Layout p{};const char *reason=flash_parameters(t,p);
+@@ -689,24 +1572,77 @@ bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
+         return b && ggml_is_contiguous(b) && ggml_is_matrix(a) && ggml_is_matrix(b) && ggml_is_matrix(t) &&
+             a->ne[0]==b->ne[0] && t->ne[0]==a->ne[1] && t->ne[1]==b->ne[1] &&
+             (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_F16 || a->type == GGML_TYPE_F32 || (use_q6(a)&&b->ne[1]<=512)) &&
+-            a->ne[0] > 0 && a->ne[0] % 32 == 0 && a->ne[0] <= 16384 && a->ne[1] > 0 && a->ne[1] <= INT_MAX && b->ne[1] > 0 &&
++            a->ne[0] > 0 && a->ne[0] % 32 == 0 &&
++            (a->ne[0] <= 16384 || (a->type == GGML_TYPE_Q4_0 && a->ne[0] <= KMAX_I8 && use_i8(a))) &&
++            a->ne[1] > 0 && a->ne[1] <= INT_MAX && b->ne[1] > 0 &&
+             b->ne[1] <= INT_MAX / std::max<int64_t>(a->ne[1], 1) && b->type == GGML_TYPE_F32 && t->type == GGML_TYPE_F32 && !a->view_src &&
+             ggml_nbytes(a) <= INT_MAX && ggml_nbytes(b) <= INT_MAX && ggml_nbytes(t) <= INT_MAX;
+     }
+-    if (a->type != GGML_TYPE_F32 || t->type != GGML_TYPE_F32 || t->ne[0] <= 0 || t->ne[0] > 16384 || ggml_nelements(t) <= 0 || ggml_nelements(t) > INT_MAX / 4) return false;
++    bool scalar_scale = false;
++    if (t->op == GGML_OP_SCALE) {
++        float sc = 0, bi = 0;
++        std::memcpy(&sc, t->op_params, 4);
++        std::memcpy(&bi, (const char *) t->op_params + 4, 4);
++        scalar_scale = std::isfinite(sc) && std::isfinite(bi);
++    }
++    if (a->type != GGML_TYPE_F32 || t->type != GGML_TYPE_F32 || t->ne[0] <= 0 || (t->ne[0] > 16384 && !scalar_scale) || ggml_nelements(t) <= 0 || ggml_nelements(t) > INT_MAX / 4) return false;
+     if (t->op == GGML_OP_RMS_NORM) {
+         float epsilon; std::memcpy(&epsilon,t->op_params,4);
+         return t->ne[0] > 0 && t->ne[0] <= 16384 && std::isfinite(epsilon) && epsilon > 0;
+     }
+-    if (t->op == GGML_OP_UNARY) return ggml_get_unary_op(t) == GGML_UNARY_OP_SILU;
+-    if (t->op == GGML_OP_SCALE) { float bias; std::memcpy(&bias, (const char *)t->op_params+4, 4); return bias == 0; }
++    if (t->op == GGML_OP_UNARY) {
++        const enum ggml_unary_op u = ggml_get_unary_op(t);
++        return u == GGML_UNARY_OP_SILU || u == GGML_UNARY_OP_SIGMOID || u == GGML_UNARY_OP_SOFTPLUS;
++    }
++    if (t->op == GGML_OP_SCALE) {
++        if (std::getenv("GGML_KUNLUN_DIAGNOSTICS")) {
++            ggml_backend_buffer_t sb = a->buffer ? a->buffer : (a->view_src ? a->view_src->buffer : nullptr);
++            std::fprintf(stderr,"[SCALE] name=%s ne=[%d,%d,%d,%d] type=%s srcbuf=%s split=%d aview=%d\n",
++                t->name, (int)t->ne[0],(int)t->ne[1],(int)t->ne[2],(int)t->ne[3],
++                ggml_type_name(t->type), sb?ggml_backend_buffer_name(sb):"null",
++                -1, a->view_src?1:0);
++        }
++        float scale, bias;
++        std::memcpy(&scale, t->op_params, 4);
++        std::memcpy(&bias, (const char *)t->op_params+4, 4);
++        if (!std::isfinite(scale) || !std::isfinite(bias)) return false;
++        if (bias == 0) return true;              /* plain scale: existing elementwise path */
++        /* scale+bias goes through kunlun-elementwise-bias; same shape limits. */
++        return t->ne[0] > 0 && t->ne[0] <= 16384 && ggml_nelements(t) <= INT_MAX/4;
++    }
+     if (t->op == GGML_OP_ADD || t->op == GGML_OP_MUL) {
+-        return b && b->type == GGML_TYPE_F32 && ggml_is_contiguous(b) &&
+-            (ggml_are_same_shape(a, b) || (ggml_nelements(b) == a->ne[0] && ggml_is_vector(b)));
++        if (!b || b->type != GGML_TYPE_F32 || !ggml_is_contiguous(b)) return false;
++        if (ggml_are_same_shape(a, b)) return true;
++        if (ggml_nelements(b) == a->ne[0] && ggml_is_vector(b)) return true;
++        /* 逐列广播：b = [1, rows, ...]，沿 ne0 广播 */
++        return b->ne[0] == 1 && b->ne[1] == a->ne[1] && b->ne[2] == a->ne[2] &&
++               b->ne[3] == a->ne[3] && a->ne[1] > 0;
+     }
+     return false;
+ }
+ 
++// 诊断：把判给 CPU 的算子按 (op, ne, type) 聚合打印一次。
++bool supports_op(ggml_backend_dev_t d, const ggml_tensor * t) {
++    const bool ok = supports_op_impl(d, t);
++    if (!ok) {
++        static const bool enabled = [] { const char * e = std::getenv("KUNLUN_SUP_DIAG"); return e && e[0] == '1'; }();
++        if (enabled) {
++            static std::mutex mtx;
++            static std::map<std::string, int> seen;
++            char key[256];
++            std::snprintf(key, sizeof(key), "%s ne=[%d,%d,%d,%d] type=%s c=%d/%d",
++                ggml_op_name(t->op),
++                (int) t->ne[0], (int) t->ne[1], (int) t->ne[2], (int) t->ne[3],
++                ggml_type_name(t->type),
++                (int) ggml_is_contiguous(t), (int) (t->src[0] ? ggml_is_contiguous(t->src[0]) : -1));
++            std::lock_guard<std::mutex> lock(mtx);
++            int n = ++seen[key];
++            if (n <= 2) std::fprintf(stderr, "KUNLUN SUPDIAG cpu: %s name=%s hit=%d\n", key, t->name, n);
++        }
++    }
++    return ok;
++}
++
+ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
+     auto * ctx = new backend_context{}; ctx->id = ((device_context *)dev->context)->id;
+     ctx->activation.enabled=activation_share_enabled();
+@@ -774,29 +1710,181 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
+         delete c; delete b;
+     };
+     iface.graph_compute = [](ggml_backend_t b, ggml_cgraph * graph) {
++        /* K200: llama.cpp's seq_rm only clears host metadata; the backend-owned
++           F16 KV max / valid-row cache survives across requests, so the next
++           request's flash-attn reads stale KV positions from the previous turn.
++           Reset it on the first (prefill, batch>1) graph of each request. */
++        static const bool kvmax_reset_prefill = [] {
++            const char * e = std::getenv("KUNLUN_KVMAX_RESET_PREFILL");
++            return e && e[0] == '1'; }();
++        if (kvmax_reset_prefill) {
++            bool prefill = false;
++            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
++                auto * t = ggml_graph_node(graph, i);
++                if (t->op == GGML_OP_MUL_MAT && t->src[1] && t->src[1]->ne[1] > 1) {
++                    prefill = true; break;
++                }
++            }
++            if (prefill) {
++                std::vector<buffer_context *> seen;
++                for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
++                    auto * t = ggml_graph_node(graph, i);
++                    if (!t->buffer) continue;
++                    auto * bc = (buffer_context *) t->buffer->context;
++                    if (!bc || std::find(seen.begin(), seen.end(), bc) != seen.end()) continue;
++                    seen.push_back(bc);
++                    kunlun::kv_max_zero(bc->type->id, bc->base, bc->size);
++                }
++            }
++        }
++        const bool k2_gc_on = k200_gc_time();
++        auto k2_gc0 = k2_gc_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++        kunlun::rope_next_graph(((backend_context *)b->context)->id);
+         std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
++        auto k2_gc1 = k2_gc_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+         auto * c = (backend_context *)b->context;
++        const bool gtime = graph_time_enabled();
++        const bool optime = op_time_enabled();
++        const bool add_coalesce_on = add_coalesce_enabled() && !optime && !common_enabled();
++        if (add_coalesce_on) g_addc.pending = nullptr;
++        const bool add3_on = add3_enabled() && !optime && !add_coalesce_on;
++        if (add3_on) g_add3.n = 0;
++        if (std::getenv("KUNLUN_ADD_COALESCE_DEBUG")) { static int s_=0; if (s_++<2) std::fprintf(stderr, "ADDC on=%d act=%d optime=%d env=%d%c", (int)add_coalesce_on, (int)c->activation.enabled, (int)optime, (int)add_coalesce_enabled(), 10); }
++        const auto gtime_t0 = std::chrono::steady_clock::now();
+         ActivationGraphScope activation_scope(c,graph);
+         GateUpGraphScope pair_scope(c,graph);
++        const bool gprof = [](){ const char * e = std::getenv("KUNLUN_GRAPH_PROFILE");
++                                 return e && std::strcmp(e,"0") != 0; }();
++        auto k2_gc2 = k2_gc_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++        const auto gprof_after_scopes = std::chrono::steady_clock::now();
++        auto gprof_loop_end = gprof_after_scopes;
++        static int opdump_seq = 0;
++        const char * opdump_path = std::getenv("K200_OPDUMP");
++        int opdump_max = 6;
++        const char * opdump_max_s = std::getenv("K200_OPDUMP_GRAPHS");
++        if (opdump_max_s) opdump_max = std::atoi(opdump_max_s);
++        int opdump_graph = opdump_seq++;
++        FILE * opdump_f = nullptr;
++        if (opdump_path && opdump_graph < opdump_max) {
++            opdump_f = std::fopen(opdump_path, "a");
++            if (opdump_f) std::fprintf(opdump_f, "=== GRAPH %d nodes=%d ===\n", opdump_graph, ggml_graph_n_nodes(graph));
++        }
+         for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+             auto * t = ggml_graph_node(graph,i);
+             if(t->op==GGML_OP_GET_ROWS && !(t->flags & GGML_TENSOR_FLAG_COMPUTE))continue;
++            if(k200_nop_loop())continue;
++            if(add_coalesce_on && add_conflicts(t)) add_flush(c);
++            if(add3_on && add3_conflicts(t)) add3_flush(c);
+             if(pair_scope.execute(t)){++i;continue;}
+-            if(c->activation.enabled)activation_write(c,t);
+-            K200_DIAG_SCOPE(node_diag,"xpu.node",ggml_op_name(t->op),t->name);
+-            kunlun::diagnostic_tensor(t->name,t->ne);
+-            if(t->op!=GGML_OP_NONE&&t->op!=GGML_OP_VIEW&&t->op!=GGML_OP_RESHAPE&&t->op!=GGML_OP_PERMUTE&&t->op!=GGML_OP_TRANSPOSE&&t->op!=GGML_OP_SET_ROWS)
++            if(c->activation.enabled&&!lean_actw())activation_write(c,t);
++            if(!lean_diag()){K200_DIAG_SCOPE(node_diag,"xpu.node",ggml_op_name(t->op),t->name);
++            kunlun::diagnostic_tensor(t->name,t->ne);}
++            if(!lean_kvmax()&&t->op!=GGML_OP_NONE&&t->op!=GGML_OP_VIEW&&t->op!=GGML_OP_RESHAPE&&t->op!=GGML_OP_PERMUTE&&t->op!=GGML_OP_TRANSPOSE&&t->op!=GGML_OP_SET_ROWS)
+                 kunlun::kv_max_invalidate(c->id,t->data,ggml_nbytes(t));
+-            if(t->op==GGML_OP_GET_ROWS)get_rows_compute(c,t);
++            const auto ot0 = std::chrono::steady_clock::now();
++            if(k200_skip_nonmm() && t->op!=GGML_OP_MUL_MAT && t->op!=GGML_OP_MUL_MAT_ID){}
++            else if(t->op==GGML_OP_GET_ROWS)get_rows_compute(c,t);
+             else if(t->op==GGML_OP_FLASH_ATTN_EXT) flash_compute(c,t);
+             else if(attention_enabled() && (attention_matrix_candidate(t) || t->op==GGML_OP_SOFT_MAX || t->op==GGML_OP_CONT || t->op==GGML_OP_ROPE)) attention_compute(c,t);
+             else if (t->op == GGML_OP_MUL_MAT) matmul(c,t);
++            else if (t->op == GGML_OP_MUL_MAT_ID) mul_mat_id(c,t);
++            else if (t->op == GGML_OP_GATED_DELTA_NET) gdn(c,t);
++            else if (t->op == GGML_OP_CPY) cpy(c,t);
+             else if (t->op == GGML_OP_SET_ROWS) set_rows(c,t);
+             else if (t->op == GGML_OP_GLU) swiglu(c,t);
++            else if (t->op == GGML_OP_SCALE && scale_has_bias(t)) elementwise_scale_bias(c,t);
++            else if (t->op == GGML_OP_ADD && fake_skip_add()) { /* FAKE skip */ }
++            else if (add3_on && t->op == GGML_OP_ADD && add3_offer(c,t)) { /* ADD3 已挂起 */ }
++            else if (add_coalesce_on && t->op == GGML_OP_ADD && add_offer(c,t)) { /* 已挂起/已合并 */ }
++            else if ((t->op == GGML_OP_ADD || t->op == GGML_OP_MUL) && t->src[1] &&
++                     t->src[1]->ne[0] == 1 && t->src[1]->ne[1] == t->ne[1] &&
++                     !ggml_are_same_shape(t->src[0], t->src[1])) ewcol(c,t);
++            else if (t->op == GGML_OP_UNARY && ggml_get_unary_op(t) != GGML_UNARY_OP_SILU) unary_op(c,t);
+             else if (t->op == GGML_OP_ADD || t->op == GGML_OP_MUL || t->op == GGML_OP_RMS_NORM || t->op == GGML_OP_UNARY || t->op == GGML_OP_SCALE) elementwise(c,t);
+             else GGML_ASSERT(t->op == GGML_OP_NONE || t->op == GGML_OP_VIEW || t->op == GGML_OP_RESHAPE || t->op == GGML_OP_PERMUTE || t->op == GGML_OP_TRANSPOSE);
++            if (optime) {
++                kunlun::wait();
++                const double oms = std::chrono::duration<double,std::milli>(
++                    std::chrono::steady_clock::now() - ot0).count();
++                op_time_add(c->id, (int) t->op, oms);
++            }
++            if (opdump_f && t->data && t->op != GGML_OP_NONE) {
++                bool interesting = t->op==GGML_OP_MUL_MAT || t->op==GGML_OP_RMS_NORM || t->op==GGML_OP_SET_ROWS || t->op==GGML_OP_FLASH_ATTN_EXT || t->op==GGML_OP_ROPE || t->op==GGML_OP_ADD || t->op==GGML_OP_GLU || t->op==GGML_OP_SOFT_MAX || t->op==GGML_OP_CONT;
++                if (interesting) {
++                    unsigned char raw[16] = {0};
++                    size_t nb = ggml_nbytes(t);
++                    size_t take = nb < sizeof(raw) ? nb : sizeof(raw);
++                    int crc = kunlun::copy(raw, t->data, take, kunlun::device_to_host);
++                    int cwc = kunlun::wait();
++                    char hex[33]; for (int j=0;j<16;++j) std::snprintf(hex+2*j, 3, "%02x", raw[j]); hex[32]=0;
++                    unsigned char mid[16] = {0};
++                    size_t moff = nb/2;
++                    size_t mtake = nb-moff < sizeof(mid) ? nb-moff : sizeof(mid);
++                    int mrc = kunlun::copy(mid, (const char*)t->data + moff, mtake, kunlun::device_to_host);
++                    int mwc = kunlun::wait();
++                    char mhex[33]; for (int j=0;j<16;++j) std::snprintf(mhex+2*j, 3, "%02x", mid[j]); mhex[32]=0;
++                    std::fprintf(opdump_f, "G%d N%d %s %s ne=%lld,%lld,%lld,%lld bytes=%zu rc=%d,%d hex=%s mid=%s mrc=%d,%d\n",
++                        opdump_graph, i, ggml_op_name(t->op), t->name,
++                        (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3],
++                        nb, crc, cwc, hex, mhex, mrc, mwc);
++                }
++            }
+         }
++        if (add_coalesce_on) add_flush(c);
++        if (add3_on) add3_flush(c);
++        if (std::getenv("KUNLUN_ADD3_DEBUG")) { static int g_ = 0; if (g_++ < 3)
++            std::fprintf(stderr, "ADD3 graph seen=%ld eligible=%ld fused=%ld inplace=%ld pending=%d\n",
++                g_add3.seen, g_add3.eligible, g_add3.fused, g_add3.inplace_skips, g_add3.n); }
++        if (std::getenv("KUNLUN_ADD_COALESCE_DEBUG")) { static int g_=0; if (g_++<2) std::fprintf(stderr, "ADDC graph done fused=%ld pending=%d%c", g_addc.fused, (int)(g_addc.pending!=nullptr), 10); }
++        auto k2_gc3 = k2_gc_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++        if (gprof) gprof_loop_end = std::chrono::steady_clock::now();
++        if (opdump_f) std::fclose(opdump_f);
+         kunlun::diagnostic_tensor(nullptr);
++        /* GRAPH-SYNC: drain whatever the depth budget left in flight. */
++        const auto gprof_before_drain = std::chrono::steady_clock::now();
++        kunlun::drain_launches();
++        if (gprof) {
++            static double g_scope = 0, g_loop = 0, g_tail = 0, g_drain = 0;
++            static size_t g_nodes = 0, g_graphs = 0;
++            const auto t_end = std::chrono::steady_clock::now();
++            auto d = [](const std::chrono::steady_clock::time_point & a,
++                        const std::chrono::steady_clock::time_point & b) {
++                return std::chrono::duration<double,std::milli>(b - a).count();
++            };
++            g_scope += d(gtime_t0, gprof_after_scopes);
++            g_loop  += d(gprof_after_scopes, gprof_loop_end);
++            g_tail  += d(gprof_loop_end, gprof_before_drain);
++            g_drain += d(gprof_before_drain, t_end);
++            g_nodes += (size_t) ggml_graph_n_nodes(graph);
++            if (++g_graphs % 100 == 0) {
++                const double tot = g_scope + g_loop + g_tail + g_drain;
++                std::fprintf(stderr,
++                  "[GRAPH_PROFILE] pd=%d graphs=%zu nodes=%zu total=%.1f ms avg=%.3f ms/graph | scopes=%.1f(%.0f%%) loop=%.1f(%.0f%%) tail=%.1f(%.0f%%) drain=%.1f(%.0f%%)\n",
++                  c->id, g_graphs, g_nodes, tot, tot / (double) g_graphs,
++                  g_scope, tot>0?100.0*g_scope/tot:0,
++                  g_loop,  tot>0?100.0*g_loop/tot:0,
++                  g_tail,  tot>0?100.0*g_tail/tot:0,
++                  g_drain, tot>0?100.0*g_drain/tot:0);
++            }
++        }
++        if (k2_gc_on) {
++            auto & a = g_k200gc[c->id];
++            const auto k2_gc4 = std::chrono::steady_clock::now();
++            auto d = [](std::chrono::steady_clock::time_point x, std::chrono::steady_clock::time_point y) {
++                return std::chrono::duration<double, std::milli>(y - x).count();
++            };
++            a.lock += d(k2_gc0, k2_gc1);
++            a.scopes += d(k2_gc1, k2_gc2);
++            a.loop += d(k2_gc2, k2_gc3);
++            a.tail += d(k2_gc3, k2_gc4);
++            a.total += d(k2_gc0, k2_gc4);
++            if (++a.calls == 1) std::atexit(k200_gc_dump);
++        }
++        if (gtime) {
++            const double ms = std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - gtime_t0).count();
++            graph_time_report(c->id, (size_t) ggml_graph_n_nodes(graph), ms);
++        }
+         return GGML_STATUS_SUCCESS;
+     };
+     return new ggml_backend{&guid,iface,dev,ctx};
+@@ -866,10 +1954,17 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
+         type_iface.get_max_size = [](ggml_backend_buffer_type_t) -> size_t { return 1ULL << 30; };
+         type_iface.get_alloc_size = [](ggml_backend_buffer_type_t b, const ggml_tensor * t) {
+             if (((type_context *)b->context)->split) return ggml_nbytes(t);
++            if (use_native_expert(t)) return native_expert_size((int)t->ne[0],(int)t->ne[1],(int)t->ne[2]);
++            if (use_i8_expert(t)) return packed_size((int)t->ne[0],(int)(t->ne[1]*t->ne[2]));
+             if (use_q6(t)) return kunlun::q6_k_size(t->ne[0],t->ne[1]);
+             if (use_common(t)) return kunlun::common_q4_size(t->ne[0],t->ne[1]);
+             if (use_native(t)) return kunlun::native_q4_size(t->ne[0],t->ne[1]);
+-            return use_i8(t) ? packed_size(t->ne[0],t->ne[1]) : ggml_nbytes(t);
++            if (use_i8(t)) {
++                int64_t n = t->ne[1] * ((t->ne[3] == 1 && t->ne[2] > 1) ? t->ne[2] : 1);
++                if (self_split_on() && n >= 2) return packed_size((int)t->ne[0], (int)(n - n/2));
++                return packed_size((int)t->ne[0], (int)n);
++            }
++            return ggml_nbytes(t);
+         };
+         buffer_iface.get_base = [](ggml_backend_buffer_t b) { return ((buffer_context *)b->context)->base; };
+         buffer_iface.init_tensor = [](ggml_backend_buffer_t b, ggml_tensor * t) {
+@@ -885,19 +1980,48 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
+                     t->name,(long long)t->ne[0],(long long)t->ne[1],use_i8(t)?"CDNN":"existing Q4");
+             if (common_enabled() && t->type==GGML_TYPE_Q4_0 && !use_common(t))
+                 std::fprintf(stderr,"KUNLUN common storage fallback: tensor=%s K=%lld N=%lld reason=type/shape/stride/view method=%s\n",t->name,(long long)t->ne[0],(long long)t->ne[1],use_native(t)?"legacy native":use_i8(t)?"CDNN":"original Q4");
+-            if (!c->type->split && !use_i8(t) && !use_native(t) && !use_common(t) && !use_q6(t)) return GGML_STATUS_SUCCESS;
++            if (c->type->split && (use_i8_expert(t) || use_native_expert(t))) return GGML_STATUS_SUCCESS;
++            if (!c->type->split && !use_i8(t) && !use_native(t) && !use_common(t) && !use_q6(t) && !use_native_expert(t)) return GGML_STATUS_SUCCESS;
+             std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
+             auto p = std::unique_ptr<tensor_parts>(new tensor_parts{});
+-            GGML_ASSERT(ggml_is_matrix(t));
+-            p->packed=use_i8(t); p->native=use_native(t);p->common=use_common(t);p->q6=use_q6(t); p->k=t->ne[0];
++            const bool expert_i8 = use_i8_expert(t);
++            const bool expert_native = use_native_expert(t);
++            GGML_ASSERT(ggml_is_matrix(t) || expert_i8 || expert_native);
++            p->packed=use_i8(t); p->native=use_native(t)||expert_native;p->common=use_common(t);p->q6=use_q6(t); p->k=t->ne[0]; p->moe=expert_i8||expert_native; p->n1=(int)t->ne[1];
++            if (t->ne[0] > 16384) {
++                static std::atomic<int> packwide{0};
++                if (packwide.fetch_add(1) < 6)
++                    std::fprintf(stderr, "[PACKWIDE] name=%s type=%d ne=%lld,%lld packed=%d native=%d common=%d q6=%d\n",
++                                 t->name, (int) t->type, (long long) t->ne[0], (long long) t->ne[1],
++                                 (int) p->packed, (int) p->native, (int) p->common, (int) p->q6);
++            }
+             if (p->packed || p->native || p->common || p->q6) p->original.resize(ggml_nbytes(t));
+-            if (c->type->split) { p->rows[0] = t->ne[1] * c->type->fraction; if(p->q6)p->rows[0]=p->rows[0]/32*32; p->rows[1] = t->ne[1] - p->rows[0]; }
+-            else p->rows[c->type->id]=t->ne[1];
++            /* KUNLUN_SELF_SPLIT=1: keep llama.cpp on one device (its graph stays whole) while this
++               backend mirrors half of the int8 rows onto the other die and runs both halves in
++               parallel inside matmul(). */
++            const bool self_split = !c->type->split && p->packed && self_split_on();
++            const bool replicate_vec = c->type->split && vec_replicate_on() && ggml_is_vector(t);
++            if (replicate_vec) {
++                /* a 1-row tensor has nothing to split: rows[1]=0 would strand it on one die and push
++                   every consumer (bias add, norm mul) onto the CPU backend */
++                p->rows[0] = (int) t->ne[1];
++                p->rows[1] = (int) t->ne[1];
++                p->replicated = true;
++                static bool once = false;
++                if (!once) { once = true; std::fprintf(stderr, "KUNLUN split: replicating vectors on both dies (e.g. %s ne=%lld,%lld)\n", t->name, (long long)t->ne[0], (long long)t->ne[1]); }
++            }
++            else if (c->type->split) { p->rows[0] = t->ne[1] * c->type->fraction; if(p->q6)p->rows[0]=p->rows[0]/32*32; p->rows[1] = t->ne[1] - p->rows[0]; }
++            else if (self_split) {
++                const int total = expert_i8 ? (int)(t->ne[1]*t->ne[2]) : (int)t->ne[1];
++                if (total >= 2) { p->rows[1] = total / 2; p->rows[0] = total - p->rows[1]; }
++                else p->rows[c->type->id] = total;
++            }
++            else p->rows[c->type->id] = (expert_i8 || expert_native) ? (int)(t->ne[1]*t->ne[2]) : (int)t->ne[1];
+             for (int d=0;d<2;++d) {
+                 p->bytes[d] = (size_t)p->rows[d]*ggml_row_size(t->type,t->ne[0]);
+-                p->physical[d] = p->q6 ? kunlun::q6_k_size(p->k,p->rows[d]) : p->common ? kunlun::common_q4_size(p->k,p->rows[d]) : p->native ? kunlun::native_q4_size(p->k,p->rows[d]) : p->packed ? packed_size(p->k,p->rows[d]) : p->bytes[d];
++                p->physical[d] = p->q6 ? kunlun::q6_k_size(p->k,p->rows[d]) : p->common ? kunlun::common_q4_size(p->k,p->rows[d]) : (p->native && p->moe && p->n1 > 0) ? native_expert_size(p->k,p->n1,p->rows[d]/p->n1) : p->native ? kunlun::native_q4_size(p->k,p->rows[d]) : p->packed ? packed_size(p->k,p->rows[d]) : p->bytes[d];
+                 if (p->bytes[d]) {
+-                    p->ptr[d] = c->type->split ? allocate(d,p->physical[d]) : t->data;
++                    p->ptr[d] = (c->type->split || (self_split && d != c->type->id)) ? allocate(d,p->physical[d]) : t->data;
+                     if (!p->ptr[d]) { for(int j=0;j<d;++j) { p->q6_weight[j].reset();p->common_weight[j].reset();release(j,p->ptr[j],p->physical[j]); } return GGML_STATUS_ALLOC_FAILED; }
+                     if(p->q6)p->q6_weight[d].reset(new kunlun::Q6KWeight(d,p->k,p->rows[d],p->ptr[d],p->physical[d]));
+                     if (p->common) {
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 9ee64b566..c510fb761 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -4,6 +4,10 @@
+ #include "llama-arch.h"
+ #include "llama-graph.h"
+ #include "llama-impl.h"
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <cstdlib>
+ #include "llama-batch.h"
+ #include "llama-io.h"
+ #include "llama-memory.h"
+@@ -1504,7 +1508,28 @@ bool llama_context::set_adapter_cvec(
+     return res;
+ }
+ 
++/* ---- K200_TOKEN_TIME: split per-token wall clock into build / inputs / compute ---- */
++namespace {
++struct K200TokenTime {
++    double build = 0, inputs = 0, compute = 0, total = 0;
++    size_t tokens = 0;
++    bool on = false;
++    K200TokenTime() {
++        const char * e = std::getenv("K200_TOKEN_TIME");
++        on = e && std::strcmp(e, "0") != 0;
++    }
++    ~K200TokenTime() {
++        if (!on || !tokens) return;
++        std::fprintf(stderr,
++            "K200TOKEN tokens=%zu per-token: total=%.3f build=%.3f inputs=%.3f compute=%.3f ms\n",
++            tokens, total / tokens, build / tokens, inputs / tokens, compute / tokens);
++    }
++};
++K200TokenTime & k200_tt() { static K200TokenTime t; return t; }
++}
++
+ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
++    const auto k2_tt0 = std::chrono::steady_clock::now();
+     if (mctx && !mctx->apply()) {
+         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+         ret = GGML_STATUS_FAILED;
+@@ -1556,6 +1581,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+ 
+         gf_res_prev_active = res;
+     }
++    const auto k2_tt1 = std::chrono::steady_clock::now();
++    if (k200_tt().on) {
++        k200_tt().build += std::chrono::duration<double,std::milli>(k2_tt1 - k2_tt0).count();
++    }
+ 
+     // set the input data for the input tensors
+     {
+@@ -1567,7 +1596,18 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+     }
+ 
++    const auto k2_tt2 = std::chrono::steady_clock::now();
++    if (k200_tt().on) {
++        k200_tt().inputs += std::chrono::duration<double,std::milli>(k2_tt2 - k2_tt1).count();
++    }
+     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
++    if (k200_tt().on) {
++        auto & tt = k200_tt();
++        const auto k2_tt3 = std::chrono::steady_clock::now();
++        tt.compute += std::chrono::duration<double,std::milli>(k2_tt3 - k2_tt2).count();
++        tt.total += std::chrono::duration<double,std::milli>(k2_tt3 - k2_tt0).count();
++        tt.tokens++;
++    }
+     if (status != GGML_STATUS_SUCCESS) {
+         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
+         ret = status;
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index a2d06b761..90f9d073e 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -581,6 +581,12 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
+                 // the LFM2 shortconv block runs fully mirrored, so its conv state must be mirrored too
+                 return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED, "");
+             }
++            // [SSM-NOSPLIT] Recurrent state gets SCALEd by qwen35moe at load time.
++            // A split (two-die) buffer cannot serve non-MUL_MAT ops on this backend,
++            // and the state is small, so keep the whole tensor on one device.
++            if (ud->model->arch == LLM_ARCH_QWEN35MOE) {
++                return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_NONE, "ssm_out.weight");
++            }
+             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0, "ssm_out.weight");
+         }
+         if (std::regex_match(tensor_name, pattern_ssm_conv1d)) {
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index a18b7542c..de8fd6084 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -3695,7 +3695,15 @@ private:
+                                 return;
+                             }
+ 
+-                            if (slot.task->params.cache_prompt && !slot.task->is_stateless()) {
++                            /* K200：默认关闭「前缀 KV 复用」。实测这套后端复用后上下文会串味——
++                               同一条消息只处理 1 个 token、其余吃旧 KV，模型会把系统提示当答案复读
++                               （"You are Qwen, created by Alibaba Cloud..."）。
++                               KUNLUN_PROMPT_CACHE=1 可恢复旧行为（长上下文更快但结果不可信）。 */
++                            static const bool k200_prompt_cache = [] {
++                                const char * e = std::getenv("KUNLUN_PROMPT_CACHE");
++                                return e && e[0] == '1';
++                            }();
++                            if (k200_prompt_cache && slot.task->params.cache_prompt && !slot.task->is_stateless()) {
+                                 // reuse any previously computed tokens that are common with the new prompt
+                                 n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
+ 
+@@ -3947,6 +3955,31 @@ private:
+                     SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
+ 
+                     slot.mem.seq_rm(slot.id, p0, -1);
++                    /* K200: seq_rm only clears host metadata. Clear the device-side
++                       KV data too, otherwise the next request's flash-attn reads
++                       stale rows from this slot's previous turn. Opt-in for A/B. */
++                    static const bool k200_mem_clear = [] {
++                        const char * e = std::getenv("KUNLUN_MEM_CLEAR");
++                        return !e || e[0] != '0';   // default ON
++                    }();
++                    /* Only for a single slot: clearing all memory would wipe
++                       other concurrent slots' KV. Verified 2026-11-10. */
++                    if (k200_mem_clear && slots.size() == 1) {
++                        llama_memory_clear(llama_get_memory(ctx_tgt), true);
++                    }
++
++                    /* K200: the DRAFT context has its own device-side KV cache.
++                       llama_memory_seq_rm(ctx_dft, ...) only clears host metadata,
++                       so a real draft model (draft-simple) accumulates KV across
++                       requests -> different drafts -> different verify batch shape
++                       -> divergent output. Clear it too. 2026-11-10. */
++                    static const bool k200_mem_clear_dft = [] {
++                        const char * e = std::getenv("KUNLUN_MEM_CLEAR_DFT");
++                        return !e || e[0] != '0';   // default ON
++                    }();
++                    if (k200_mem_clear_dft && slots.size() == 1 && ctx_dft) {
++                        llama_memory_clear(llama_get_memory(ctx_dft), true);
++                    }
+ 
+                     // shared prompt prefix: once it is processed, the children continue from it with their own prompt
+                     bool wait_shared = false;
+diff --git a/vendor/KunlunK200 b/vendor/KunlunK200
+--- a/vendor/KunlunK200
++++ b/vendor/KunlunK200
+@@ -1 +1 @@
+-Subproject commit bd99c9dd4423d41ec2e76b1ce5d582bd19ad85bc
++Subproject commit bd99c9dd4423d41ec2e76b1ce5d582bd19ad85bc-dirty

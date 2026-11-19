@@ -1,0 +1,392 @@
+diff --git a/include/kunlun/k200.h b/include/kunlun/k200.h
+index 77d8406..9143efc 100644
+--- a/include/kunlun/k200.h
++++ b/include/kunlun/k200.h
+@@ -38,7 +40,7 @@ private:
+ 
+ // q6_k requires Q6KWeight + q6_k_matmul; legacy raw matmul does not accept it.
+ enum class WeightType { f32 = 0, f16 = 1, q4_0 = 2, rowwise_i8 = 3, q6_k = 4 };
+-enum class ElementwiseOp { add = 0, multiply = 1, silu = 2, rms_norm = 3, scale = 4 };
++enum class ElementwiseOp { add = 0, multiply = 1, silu = 2, rms_norm = 3, scale = 4, scale_bias = 5 };
+ 
+ struct SetRowsLayout {
+     int width, rows, dim2, dim3;
+@@ -79,8 +81,26 @@ private:
+     friend AttentionStatistics attention_statistics(const Kernel &);
+     friend void matmul(Kernel &, int, void *, const void *, const void *, int, int, int,
+                        WeightType, const float *, const float *, int);
++    friend void matmul_mt(Kernel &, int, void *, const void *, const void *, int, int, int,
++                          WeightType, const float *, const float *, int);
+     friend void elementwise(Kernel &, int, void *, const void *, const void *, int, int,
+                             int, ElementwiseOp, float);
++    friend void elementwise_bias(Kernel &, int, void *, const void *, const void *,
++                                 int, int, int, ElementwiseOp, float, float);
++    friend void elementwise_add3(Kernel &, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int);
++    friend void elementwise_add3v2(Kernel &, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int);
++    friend void ew_col(Kernel &, int, void *, const void *, const void *, int, int, int);
++    friend void unary(Kernel &, int, void *, const void *, int, int);
++    friend void gdn(Kernel &, int, void *, void *, const void *, const void *, const void *,
++                     const void *, const void *, const void *, int, int, int, int, int, float);
++    friend void elementwise_add2(Kernel &, int, void *, const void *, const void *, int, int, int,
++                              void *, const void *, const void *, int, int, int);
+     friend void copy_rows(Kernel &, int, void *, const void *, int, int, int, int);
+     friend bool set_rows_f16(Kernel &, int, void *, size_t, const void *, size_t, const void *, size_t, const SetRowsLayout &);
+     friend void rms_norm(Kernel &, int, void *, const void *, int, int, float);
+@@ -100,12 +120,59 @@ void upload_i8_rows(int device, void * weights, int k, int rows,
+ // rowwise_i8 requires scales[n] and maxima[6], also in device memory.
+ // matmul submits work; select(device) + check(wait()) completes it.
+ // elementwise completes before returning. K must be divisible by 32, K <= 16384.
++bool moe_i8_matmul(int device, void * y, const void * w_i8, const float * scales, const void * x, int k, int n);
+ void matmul(Kernel &, int device, void * y, const void * w, const void * x,
+             int k, int n, int batch, WeightType type,
+             const float * scales = nullptr, const float * maxima = nullptr, int tile = 16);
++/* KUNLUN_I8_MT helpers: one matmul half per thread. xpu_set_device is thread-local and
++   every xdnn context is per device, so the global lock can be skipped as long as each
++   thread has bound its device and i8_prepare() ran once from the main thread.
++   Only the rowwise_i8 fast path is supported. */
++void matmul_mt(Kernel &, int device, void * y, const void * w, const void * x,
++               int k, int n, int batch, WeightType type,
++               const float * scales, const float * maxima, int tile = 16);
++void i8_prepare(int device);
++void rope_next_graph(int id);
+ void elementwise(Kernel &, int device, void * y, const void * a, const void * b,
+                  int count, int width, int b_count, ElementwiseOp op, float parameter = 0);
+ 
++// SCALE with additive bias: y = a * scale + bias (ggml_scale_bias).
++// Submits work; wait() completes it.
++void elementwise_bias(Kernel &, int device, void * y, const void * a, const void * b,
++                      int count, int width, int b_count, ElementwiseOp op, float parameter, float bias);
++
++// 两路 y = a + b 合成一次 launch（子图合并）。biasN=1 时 b 按行广播（形状 [width]）。
++void elementwise_add2(Kernel &, int device,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1);
++
++// Gated Delta Net 单 token 更新（decode）。out/state_out 同在 dst 里，布局见 ggml.c。
++// kda=1 表示 g 形状为 [S_v, H_v, 1, n_seqs]；否则为标量 gate。
++void gdn(Kernel &, int device, void * out, void * state_out,
++         const void * q, const void * k, const void * v, const void * g,
++         const void * beta, const void * state_in,
++         int S_v, int H_v, int H_k, int n_seqs, int kda, float scale);
++
++// 逐元素一元算子：op 1=sigmoid 2=softplus 3=exp。原地安全（逐块读-算-写）。
++void unary(Kernel &, int device, void * y, const void * a, int count, int op);
++
++// 逐列广播：y = a OP b，b 形状 [1, rows]，a 形状 [width, rows]。op 0=ADD 1=MUL。
++void ew_col(Kernel &, int device, void * y, const void * a, const void * b,
++            int rows, int width, int op);
++
++// 三段不同形状的 y = a + b 合成一次 launch（bias/residual）。biasN=1 时 b 按行广播。
++// rowsN==0 表示该段跳过。
++void elementwise_add3(Kernel &, int device,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2);
++
++// v2：全内联 kernel + 参数打包（84 B）。同签名；未用段必须传有效设备指针（rows=0 跳过）。
++void elementwise_add3v2(Kernel &, int device,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2);
++
+ // Copy contiguous F32 rows into a strided device output. Pointers must not overlap.
+ // Stride and offset are in F32 elements. Submits work; wait() completes it.
+ void copy_rows(Kernel &, int device, void * dst, const void * src,
+diff --git a/src/k200.cpp b/src/k200.cpp
+index 1d39728..5f82426 100644
+--- a/src/k200.cpp
++++ b/src/k200.cpp
+@@ -124,6 +234,7 @@ void upload_i8_rows(int id, void * weights, int k, int n, int first, int count,
+ struct Kernel::Impl {
+     std::shared_ptr<void> flash;
+     Impl * elementwise = nullptr;
++    Impl * elementwise2 = nullptr;
+     Impl * broadcast = nullptr;
+     Impl * swiglu = nullptr;
+     Impl * attention_pack_a=nullptr,*attention_pack_b=nullptr;
+@@ -181,12 +292,41 @@ void combine_mv(Kernel::Impl & parent, int id, void * y, const void * products,
+         check(xpu_launch_argument_set(arg,8,offset)); offset+=8;
+     }
+     for (const int * arg : {&n,&batch}) { check(xpu_launch_argument_set(arg,4,offset)); offset+=4; }
+-    check(xpu_launch_config(4,8)); check(xpu_launch_async(fn.fn));
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn));
+ }
+ 
+ void launch_mv(Kernel::Impl & fn, int id, void * y, const void * w, const void * x, int k, int n, int batch, int type, const float * row_scales, const float * weight_max, int tile) {
+     select(id); fn.id = id;
+     if (type == 3) {
++        const char * direct = std::getenv("KUNLUN_I8_GEMM");
++        if (direct && std::strcmp(direct, "1") == 0) {
++            static xdnn::Context * i8_ctx[2] = {nullptr, nullptr};
++            if (!i8_ctx[id]) {
++                i8_ctx[id] = new xdnn::Context(xdnn::Device(xdnn::kXPU1, id));
++                require(i8_ctx[id]);
++                i8_ctx[id]->set_ncluster(ncluster_count());
++            }
++            int i8_rc = baidu::xpu::api::gemm_int8(i8_ctx[id], false, true, batch, n, k, 1.0f,
++                        (const float *)x, k, (const int8_t *)w, 127.0f, k,
++                        0.0f, (float *)y, n);
++            int i8_rc2 = -1;
++            if (i8_rc == 0) {
++                i8_rc2 = xdnn::broadcast_mul<float>(i8_ctx[id], (const float *)y, row_scales, (float *)y, {batch, n}, {1, n});
++            }
++            if (k > 16384) {
++                static std::atomic<int> wide_logged{0};
++                if (wide_logged.fetch_add(1) < 8)
++                    std::fprintf(stderr, "[I8WIDE] pd=%d M=%d N=%d K=%d gemm_rc=%d bmul_rc=%d ptr(x)=%p ptr(w)=%p ptr(y)=%p scales=%p\n",
++                                 id, batch, n, k, i8_rc, i8_rc2, (const void*)x, w, y, (const void*)row_scales);
++            }
++            check(i8_rc);
++            check(i8_rc2);
++            static std::atomic<int> i8_gemm_logged{0};
++            if (!i8_gemm_logged.fetch_add(1))
++                std::fprintf(stderr, "KUNLUN I8 GEMM direct PD%d: K=%d N=%d M=%d (vendor gemm_int8 + rowwise scale)\n", id, k, n, batch);
++            ++matmuls[id];
++            return;
++        }
+         const char * mode=std::getenv("KUNLUN_GEMV");
+         bool packed=(!mode || std::strcmp(mode,"auto") == 0) ? batch <= 8 : std::strcmp(mode,"fused") == 0;
+         bool fused=packed && n <= INT_MAX/8/batch;
+@@ -194,7 +334,7 @@ void launch_mv(Kernel::Impl & fn, int id, void * y, const void * w, const void *
+             if (!fn.combine) fn.combine=new Kernel::Impl{};
+             load_kernel(*fn.combine,"kunlun-combine",id);
+         }
+-        if (!fn.vendor) { fn.vendor=xdnn::create_context(); require(fn.vendor); fn.vendor->set_ncluster(4); }
++        if (!fn.vendor) { fn.vendor=xdnn::create_context(); require(fn.vendor); fn.vendor->set_ncluster(ncluster_count()); }
+         {
+             size_t count = (size_t)k*batch, stride = aligned(count), qs = 2*stride, ys = (size_t)n*batch*4;
+             size_t cs=fused ? 2*ys : ys, correction_offset=fused ? count : stride;
+@@ -243,13 +383,13 @@ void launch_mv(Kernel::Impl & fn, int id, void * y, const void * w, const void *
+     size_t offset = 0;
+     for (const void * arg : { (const void *)&y, (const void *)&w, (const void *)&x }) { check(xpu_launch_argument_set(arg, 8, offset)); offset += 8; }
+     for (const int * arg : { &k, &n, &batch, &type, &tile }) { check(xpu_launch_argument_set(arg, 4, offset)); offset += 4; }
+-    check(xpu_launch_config(4, 8)); check(xpu_launch_async(fn.fn)); ++matmuls[id];
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn)); ++matmuls[id];
+ }
+ 
+ Kernel::Kernel(): impl_(new Impl{}) {}
+ Kernel::~Kernel() {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+-    for (auto * state : {impl_->elementwise,impl_->broadcast,impl_->swiglu,impl_->attention_pack_a,impl_->attention_pack_b,impl_->attention_range,impl_->attention_range_dma,impl_->attention_sd,impl_->attention_sm_fast,impl_->attention_sm_typed,impl_->attention_mm,impl_->attention_sm,impl_->attention_cp,impl_->attention_phase,impl_->attention_rope,impl_->get_rows,impl_->get_rows_f32,impl_->copy_rows,impl_->set_rows,impl_->flash_set_rows,impl_->rms_partial,impl_->rms_output,impl_->combine,impl_}) {
++    for (auto * state : {impl_->elementwise,impl_->elementwise2,impl_->broadcast,impl_->swiglu,impl_->attention_pack_a,impl_->attention_pack_b,impl_->attention_range,impl_->attention_range_dma,impl_->attention_sd,impl_->attention_sm_fast,impl_->attention_sm_typed,impl_->attention_mm,impl_->attention_sm,impl_->attention_cp,impl_->attention_phase,impl_->attention_rope,impl_->get_rows,impl_->get_rows_f32,impl_->copy_rows,impl_->set_rows,impl_->flash_set_rows,impl_->rms_partial,impl_->rms_output,impl_->combine,impl_}) {
+         if (!state) continue;
+         auto & p=*state;
+         if (p.id >= 0) {
+@@ -265,11 +405,33 @@ Kernel::~Kernel() {
+         delete state;
+     }
+ }
++/* MoE expert matmul on the vendor path: one int8 GEMV + rowwise scale.
++   y[n] = (W_int8[e][n][k] @ x[k]) * scales[n]   -- single token (m == 1). */
++bool moe_i8_matmul(int id, void * y, const void * w_i8, const float * scales, const void * x, int k, int n) {
++    static xdnn::Context * moe_ctx[2] = {nullptr, nullptr};
++    if (id < 0 || id > 1) return false;
++    select(id);   /* the vendor API targets the CURRENT device, not the Context's */
++    if (!moe_ctx[id]) {
++        moe_ctx[id] = new xdnn::Context(xdnn::Device(xdnn::kXPU1, id));
++        if (!moe_ctx[id]) return false;
++        moe_ctx[id]->set_ncluster(ncluster_count());
++    }
++    if (baidu::xpu::api::gemm_int8(moe_ctx[id], false, true, 1, n, k, 1.0f,
++            (const float *) x, k, (const int8_t *) w_i8, 127.0f, k,
++            0.0f, (float *) y, n) != 0) return false;
++    if (scales && xdnn::broadcast_mul<float>(moe_ctx[id], (const float *) y, scales,
++                                             (float *) y, {1, n}, {1, n}) != 0) return false;
++    return true;
++}
++
+ void matmul(Kernel & kernel, int id, void * y, const void * w, const void * x,
+             int k, int n, int batch, WeightType type, const float * scales, const float * maximum, int tile) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+     require(type == WeightType::f32 || type == WeightType::f16 || type == WeightType::q4_0 || type == WeightType::rowwise_i8);
+-    require(k > 0 && k <= 16384 && k%32 == 0 && n > 0 && batch > 0 && n <= INT_MAX/batch && k <= INT_MAX/batch);
++    /* the vendor gemm_int8 path handles K wider than 16384 (verified 18944 @ 124 GB/s);
++       the self-written Q4/F16 kernels stay at the original limit. */
++    const int kmax_w8 = type == WeightType::rowwise_i8 ? 65536 : 16384;
++    require(k > 0 && k <= kmax_w8 && k%32 == 0 && n > 0 && batch > 0 && n <= INT_MAX/batch && k <= INT_MAX/batch);
+     require((size_t)n*batch <= INT_MAX/4 && (size_t)k*batch <= INT_MAX/4);
+     size_t row_bytes=type == WeightType::f32 ? (size_t)k*4 : type == WeightType::f16 ? (size_t)k*2 : type == WeightType::q4_0 ? (size_t)k/32*18 : (size_t)k;
+     require(y && w && x && (size_t)n <= INT_MAX/row_bytes && (tile == 1 || tile == 16));
+@@ -277,6 +439,176 @@ void matmul(Kernel & kernel, int id, void * y, const void * w, const void * x,
+     require(type != WeightType::rowwise_i8 || (scales && maximum));
+     launch_mv(*kernel.impl_,id,y,w,x,k,n,batch,(int)type,scales,maximum,tile);
+ }
++void elementwise_add3(Kernel & kernel, int id,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(rows0 >= 0 && rows1 >= 0 && rows2 >= 0);
++    require(rows0 == 0 || (y0 && a0 && b0 && width0 > 0));
++    require(rows1 == 0 || (y1 && a1 && b1 && width1 > 0));
++    require(rows2 == 0 || (y2 && a2 && b2 && width2 > 0));
++    require(bias0 == 0 || bias0 == 1);
++    require(bias1 == 0 || bias1 == 1);
++    require(bias2 == 0 || bias2 == 1);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    kernel.impl_->id = id;
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-elementwise-add3", id);
++    if (!y0) y0 = (void *) a0;
++    if (!y1) y1 = (void *) a1;
++    if (!y2) y2 = (void *) a2;
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &y0, (const void *) &a0, (const void *) &b0,
++                             (const void *) &y1, (const void *) &a1, (const void *) &b1,
++                             (const void *) &y2, (const void *) &a2, (const void *) &b2}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&rows0, &width0, &bias0, &rows1, &width1, &bias1, &rows2, &width2, &bias2}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    note_launch();
++    if (!async_ops()) check(xpu_wait());
++}
++
++/* add3v2：与 elementwise_add3 同签名，但把每段 (rows,width,bias) 打包成 1 个 int。
++ * 参数区 9*8 + 3*4 = 84 B；空段由调用方填成有效设备指针，rows=0 时 kernel 跳过。 */
++static int add3_pack_cfg(int rows, int width, int bias) {
++    return ((bias & 1) << 30) | ((width & 0x3ffff) << 12) | (rows & 0xfff);
++}
++void elementwise_add3v2(Kernel & kernel, int id,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(rows0 >= 0 && rows1 >= 0 && rows2 >= 0);
++    require(y0 && a0 && b0 && y1 && a1 && b1 && y2 && a2 && b2);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    kernel.impl_->id = id;
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-elementwise-add3v2", id);
++    int c0 = add3_pack_cfg(rows0, width0, bias0);
++    int c1 = add3_pack_cfg(rows1, width1, bias1);
++    int c2 = add3_pack_cfg(rows2, width2, bias2);
++    /* 原地别名快照：与 elementwise() 完全相同，只是每段各用一块独立 buffer。
++       默认流保序，KUNLUN_ALIAS_NOWAIT=1 时原版也不做全设备 wait，这里保持一致。 */
++    void * ya[3] = {y0, y1, y2};
++    const void * aa[3] = {a0, a1, a2};
++    const void * bb[3] = {b0, b1, b2};
++    const int rr[3] = {rows0, rows1, rows2};
++    const int ww[3] = {width0, width1, width2};
++    const int biasv[3] = {bias0, bias1, bias2};
++    static void * snap[2][3] = {{nullptr, nullptr, nullptr}, {nullptr, nullptr, nullptr}};
++    static size_t snap_cap[2][3] = {{0, 0, 0}, {0, 0, 0}};
++    for (int i = 0; i < 3; ++i) {
++        if (rr[i] <= 0 || (ya[i] != aa[i] && ya[i] != bb[i])) continue;
++        size_t elems = (size_t) rr[i] * ww[i];
++        if (ya[i] == bb[i] && biasv[i]) elems = (size_t) ww[i];
++        const size_t bytes = elems * 4;
++        void * & dst = snap[id & 1][i];
++        size_t & cap = snap_cap[id & 1][i];
++        if (cap < bytes) {
++            if (dst) release(id, dst, cap);
++            dst = allocate(id, bytes);
++            cap = bytes;
++        }
++        require(dst);
++        copy_rows(kernel, id, dst, ya[i], (int) elems, 1, (int) elems, 0);
++        if (bb[i] == ya[i]) bb[i] = dst;
++        if (aa[i] == ya[i]) aa[i] = dst;
++    }
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &ya[0], (const void *) &aa[0], (const void *) &bb[0],
++                             (const void *) &ya[1], (const void *) &aa[1], (const void *) &bb[1],
++                             (const void *) &ya[2], (const void *) &aa[2], (const void *) &bb[2]}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&c0, &c1, &c2}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    note_launch();
++    if (!async_ops()) check(xpu_wait());
++}
++
++void ew_col(Kernel & kernel, int id, void * y, const void * a, const void * b,
++            int rows, int width, int op) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(y && a && b && rows > 0 && width > 0 && width <= 16384);
++    require(op == 0 || op == 1);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-ew-col", id);
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &y, (const void *) &a, (const void *) &b}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&rows, &width, &op}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    if (!async_ops()) check(xpu_wait());
++}
++void unary(Kernel & kernel, int id, void * y, const void * a, int n, int op) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(y && a && n > 0 && n <= INT_MAX / 4 && op >= 1 && op <= 3);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-unary", id);
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &y, (const void *) &a}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    check(xpu_launch_argument_set(&n, 4, offset)); offset += 4;
++    check(xpu_launch_argument_set(&op, 4, offset));
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    if (!async_ops()) check(xpu_wait());
++}
++void gdn(Kernel & kernel, int id, void * out, void * state_out,
++         const void * q, const void * k, const void * v, const void * g,
++         const void * beta, const void * state_in,
++         int S_v, int H_v, int H_k, int n_seqs, int kda, float scale) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(out && state_out && q && k && v && g && beta && state_in);
++    require(S_v > 0 && S_v <= 256 && H_v > 0 && H_k > 0 && n_seqs > 0);
++    require(H_v % H_k == 0 && (kda == 0 || kda == 1) && std::isfinite(scale));
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-gdn", id);
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &out, (const void *) &state_out, (const void *) &q,
++                             (const void *) &k, (const void *) &v, (const void *) &g,
++                             (const void *) &beta, (const void *) &state_in}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&S_v, &H_v, &H_k, &n_seqs, &kda}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_argument_set(&scale, 4, offset));
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    if (!async_ops()) check(xpu_wait());
++}
+ void elementwise(Kernel & kernel, int id, void * y, const void * a, const void * b,
+                  int n, int width, int bn, ElementwiseOp operation, float parameter) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);

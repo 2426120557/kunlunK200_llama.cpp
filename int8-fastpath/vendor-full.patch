@@ -1,0 +1,1493 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f054b1a..90f39dd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,7 +26,7 @@ file(GLOB native_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/
+ file(GLOB_RECURSE common_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/common-q4/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/common-q4/*.xpu")
+ file(GLOB root_kernel_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.xpu")
+ list(APPEND native_headers ${common_headers} ${root_kernel_sources} "${CMAKE_CURRENT_SOURCE_DIR}/kernels/fp16-device.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/attention-config.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/flash-config.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/flash-decode-config.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/flash-online-simd8.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/flash-online-unroll16.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/flash-online-device.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/flash-kq-device.h" "${CMAKE_CURRENT_SOURCE_DIR}/kernels/flash-decode-config.h")
+-foreach(name kunlun-common-main-pack kunlun-common-residual-pack kunlun-common-max-exact kunlun-common-main-exact kunlun-common-residual-exact kunlun-common-sum-pair-fast kunlun-common-gemv-pair-dma-const-nmajor kunlun-common-gemv-pair-dma-const-stream kunlun-common-gemv-pair-dma-const-preaddr-nmajor kunlun-common-gemv-pair-dma-const-preaddr-stream kunlun-common-gemv-pair-preaddr-nmajor kunlun-common-gemv-pair-preaddr-stream kunlun-common-gemv-pair-nmajor kunlun-common-gemv-pair-stream kunlun-common-sum-pair kunlun-common-sum-fast kunlun-common-gemv-addr32-stream kunlun-common-gemv-addr32-nmajor kunlun-get-rows-f32 kunlun-get-rows kunlun-q6-onchip kunlun-q6-sdnn kunlun-q6-quant kunlun-q6-join kunlun-flash-kq-kv-group kunlun-flash-pv-kv-group kunlun-flash-decode-kq-kv-group kunlun-flash-decode-pv-kv-group kunlun-flash-decode-pv-head-kv-group kunlun-flash-online-simd8 kunlun-flash-decode-online-simd8 kunlun-flash-decode-online-head-simd8 kunlun-flash-online-unroll16 kunlun-flash-pipeline-profile-kq kunlun-flash-pipeline-profile-online kunlun-flash-pipeline-profile-pv kunlun-kv-max-writer kunlun-kv-max-build kunlun-kv-max-reduce kunlun-flash-decode-kq-head kunlun-flash-decode-pv-head-affinity kunlun-flash-profile-decode-kq-head kunlun-flash-profile-decode-pv-head kunlun-flash-profile-kq kunlun-flash-profile-pv kunlun-flash-profile-decode-kq kunlun-flash-profile-decode-pv kunlun-flash-profile-online kunlun-flash-profile-decode-online kunlun-flash-profile-decode-reduce kunlun-flash-decode-online-head kunlun-flash-decode-pv-head kunlun-flash-decode-reduce-head kunlun-flash-decode-kq kunlun-flash-decode-pv kunlun-flash-decode-online kunlun-flash-decode-reduce kunlun-flash-kq-reuse1024 kunlun-flash-online-ordered kunlun-flash-pv-wide kunlun-flash-set-rows kunlun-flash-range kunlun-flash-kq kunlun-flash-pv kunlun-flash-online kunlun-attention-range-dma kunlun-attention-softmax-typed kunlun-attention-softmax-fast kunlun-attention-range kunlun-attention-sdnn kunlun-attention-pack kunlun-attention-matmul kunlun-attention-softmax kunlun-attention-copy kunlun-attention-rope-phase kunlun-attention-rope kunlun-swiglu kunlun-elementwise-broadcast kunlun-common-gemv-nmajor kunlun-common-gemv kunlun-common-gemv-stream kunlun-common-combined kunlun-common-wide kunlun-common-rows64 kunlun-common-rows128 kunlun-common-rows128-owners kunlun-common-combo4-owners kunlun-common-combo2 kunlun-common-combo4 kunlun-common-quant-partial kunlun-common-quant-row-fused kunlun-common-quant-row-serial-fused kunlun-common-join-slices kunlun-common-max kunlun-common-main kunlun-common-residual kunlun-common-sum kunlun-common-io kunlun-common-fallback kunlun-matvec kunlun-elementwise kunlun-copy-rows kunlun-set-rows kunlun-rms-partial kunlun-rms-output kunlun-combine kunlun-native-q4 kunlun-native-q4-n32 kunlun-native-q4-max kunlun-native-q4-main kunlun-native-q4-residual kunlun-native-q4-sum kunlun-native-q4-fallback)
++foreach(name kunlun-common-main-pack kunlun-common-residual-pack kunlun-common-max-exact kunlun-common-main-exact kunlun-common-residual-exact kunlun-common-sum-pair-fast kunlun-common-gemv-pair-dma-const-nmajor kunlun-common-gemv-pair-dma-const-stream kunlun-common-gemv-pair-dma-const-preaddr-nmajor kunlun-common-gemv-pair-dma-const-preaddr-stream kunlun-common-gemv-pair-preaddr-nmajor kunlun-common-gemv-pair-preaddr-stream kunlun-common-gemv-pair-nmajor kunlun-common-gemv-pair-stream kunlun-common-sum-pair kunlun-common-sum-fast kunlun-common-gemv-addr32-stream kunlun-common-gemv-addr32-nmajor kunlun-get-rows-f32 kunlun-get-rows kunlun-q6-onchip kunlun-q6-sdnn kunlun-q6-quant kunlun-q6-join kunlun-flash-kq-kv-group kunlun-flash-pv-kv-group kunlun-flash-decode-kq-kv-group kunlun-flash-decode-pv-kv-group kunlun-flash-decode-pv-head-kv-group kunlun-flash-online-simd8 kunlun-flash-decode-online-simd8 kunlun-flash-decode-online-head-simd8 kunlun-flash-online-unroll16 kunlun-flash-pipeline-profile-kq kunlun-flash-pipeline-profile-online kunlun-flash-pipeline-profile-pv kunlun-kv-max-writer kunlun-kv-max-build kunlun-kv-max-reduce kunlun-flash-decode-kq-head kunlun-flash-decode-pv-head-affinity kunlun-flash-profile-decode-kq-head kunlun-flash-profile-decode-pv-head kunlun-flash-profile-kq kunlun-flash-profile-pv kunlun-flash-profile-decode-kq kunlun-flash-profile-decode-pv kunlun-flash-profile-online kunlun-flash-profile-decode-online kunlun-flash-profile-decode-reduce kunlun-flash-decode-online-head kunlun-flash-decode-pv-head kunlun-flash-decode-reduce-head kunlun-flash-decode-kq kunlun-flash-decode-pv kunlun-flash-decode-online kunlun-flash-decode-reduce kunlun-flash-kq-reuse1024 kunlun-flash-online-ordered kunlun-flash-pv-wide kunlun-flash-set-rows kunlun-flash-range kunlun-flash-kq kunlun-flash-pv kunlun-flash-online kunlun-attention-range-dma kunlun-attention-softmax-typed kunlun-attention-softmax-fast kunlun-attention-range kunlun-attention-sdnn kunlun-attention-pack kunlun-attention-matmul kunlun-attention-softmax kunlun-attention-copy kunlun-attention-rope-phase kunlun-attention-rope kunlun-swiglu kunlun-elementwise-broadcast kunlun-common-gemv-nmajor kunlun-common-gemv kunlun-common-gemv-stream kunlun-common-combined kunlun-common-wide kunlun-common-rows64 kunlun-common-rows128 kunlun-common-rows128-owners kunlun-common-combo4-owners kunlun-common-combo2 kunlun-common-combo4 kunlun-common-quant-partial kunlun-common-quant-row-fused kunlun-common-quant-row-serial-fused kunlun-common-join-slices kunlun-common-max kunlun-common-main kunlun-common-residual kunlun-common-sum kunlun-common-io kunlun-common-fallback kunlun-dequant-q4-f32 kunlun-matvec kunlun-elementwise-add2 kunlun-elementwise kunlun-copy-rows kunlun-set-rows kunlun-rms-partial kunlun-rms-output kunlun-combine kunlun-native-q4 kunlun-native-q4-n32 kunlun-native-q4-max kunlun-native-q4-main kunlun-native-q4-residual kunlun-native-q4-sum kunlun-native-q4-fallback)
+     if(KUNLUN_PREBUILT_KERNELS)
+         foreach(ext bin entry)
+             configure_file("${KUNLUN_PREBUILT_KERNELS}/${name}.${ext}" "${kernel_output}/${name}.${ext}" COPYONLY)
+diff --git a/include/kunlun/k200.h b/include/kunlun/k200.h
+index 77d8406..9143efc 100644
+--- a/include/kunlun/k200.h
++++ b/include/kunlun/k200.h
+@@ -15,6 +15,8 @@ void require(bool condition);
+ int device_count(int * count);
+ void select(int device);
+ int wait();
++void note_launch();
++void drain_launches();
+ enum CopyKind { host_to_device, device_to_host, device_to_device };
+ int copy(void * dst, const void * src, size_t bytes, CopyKind kind);
+ void peer(int dst_device, void * dst, int src_device, const void * src, size_t bytes);
+@@ -38,7 +40,7 @@ private:
+ 
+ // q6_k requires Q6KWeight + q6_k_matmul; legacy raw matmul does not accept it.
+ enum class WeightType { f32 = 0, f16 = 1, q4_0 = 2, rowwise_i8 = 3, q6_k = 4 };
+-enum class ElementwiseOp { add = 0, multiply = 1, silu = 2, rms_norm = 3, scale = 4 };
++enum class ElementwiseOp { add = 0, multiply = 1, silu = 2, rms_norm = 3, scale = 4, scale_bias = 5 };
+ 
+ struct SetRowsLayout {
+     int width, rows, dim2, dim3;
+@@ -79,8 +81,26 @@ private:
+     friend AttentionStatistics attention_statistics(const Kernel &);
+     friend void matmul(Kernel &, int, void *, const void *, const void *, int, int, int,
+                        WeightType, const float *, const float *, int);
++    friend void matmul_mt(Kernel &, int, void *, const void *, const void *, int, int, int,
++                          WeightType, const float *, const float *, int);
+     friend void elementwise(Kernel &, int, void *, const void *, const void *, int, int,
+                             int, ElementwiseOp, float);
++    friend void elementwise_bias(Kernel &, int, void *, const void *, const void *,
++                                 int, int, int, ElementwiseOp, float, float);
++    friend void elementwise_add3(Kernel &, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int);
++    friend void elementwise_add3v2(Kernel &, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int,
++                                void *, const void *, const void *, int, int, int);
++    friend void ew_col(Kernel &, int, void *, const void *, const void *, int, int, int);
++    friend void unary(Kernel &, int, void *, const void *, int, int);
++    friend void gdn(Kernel &, int, void *, void *, const void *, const void *, const void *,
++                     const void *, const void *, const void *, int, int, int, int, int, float);
++    friend void elementwise_add2(Kernel &, int, void *, const void *, const void *, int, int, int,
++                              void *, const void *, const void *, int, int, int);
+     friend void copy_rows(Kernel &, int, void *, const void *, int, int, int, int);
+     friend bool set_rows_f16(Kernel &, int, void *, size_t, const void *, size_t, const void *, size_t, const SetRowsLayout &);
+     friend void rms_norm(Kernel &, int, void *, const void *, int, int, float);
+@@ -100,12 +120,59 @@ void upload_i8_rows(int device, void * weights, int k, int rows,
+ // rowwise_i8 requires scales[n] and maxima[6], also in device memory.
+ // matmul submits work; select(device) + check(wait()) completes it.
+ // elementwise completes before returning. K must be divisible by 32, K <= 16384.
++bool moe_i8_matmul(int device, void * y, const void * w_i8, const float * scales, const void * x, int k, int n);
+ void matmul(Kernel &, int device, void * y, const void * w, const void * x,
+             int k, int n, int batch, WeightType type,
+             const float * scales = nullptr, const float * maxima = nullptr, int tile = 16);
++/* KUNLUN_I8_MT helpers: one matmul half per thread. xpu_set_device is thread-local and
++   every xdnn context is per device, so the global lock can be skipped as long as each
++   thread has bound its device and i8_prepare() ran once from the main thread.
++   Only the rowwise_i8 fast path is supported. */
++void matmul_mt(Kernel &, int device, void * y, const void * w, const void * x,
++               int k, int n, int batch, WeightType type,
++               const float * scales, const float * maxima, int tile = 16);
++void i8_prepare(int device);
++void rope_next_graph(int id);
+ void elementwise(Kernel &, int device, void * y, const void * a, const void * b,
+                  int count, int width, int b_count, ElementwiseOp op, float parameter = 0);
+ 
++// SCALE with additive bias: y = a * scale + bias (ggml_scale_bias).
++// Submits work; wait() completes it.
++void elementwise_bias(Kernel &, int device, void * y, const void * a, const void * b,
++                      int count, int width, int b_count, ElementwiseOp op, float parameter, float bias);
++
++// 两路 y = a + b 合成一次 launch（子图合并）。biasN=1 时 b 按行广播（形状 [width]）。
++void elementwise_add2(Kernel &, int device,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1);
++
++// Gated Delta Net 单 token 更新（decode）。out/state_out 同在 dst 里，布局见 ggml.c。
++// kda=1 表示 g 形状为 [S_v, H_v, 1, n_seqs]；否则为标量 gate。
++void gdn(Kernel &, int device, void * out, void * state_out,
++         const void * q, const void * k, const void * v, const void * g,
++         const void * beta, const void * state_in,
++         int S_v, int H_v, int H_k, int n_seqs, int kda, float scale);
++
++// 逐元素一元算子：op 1=sigmoid 2=softplus 3=exp。原地安全（逐块读-算-写）。
++void unary(Kernel &, int device, void * y, const void * a, int count, int op);
++
++// 逐列广播：y = a OP b，b 形状 [1, rows]，a 形状 [width, rows]。op 0=ADD 1=MUL。
++void ew_col(Kernel &, int device, void * y, const void * a, const void * b,
++            int rows, int width, int op);
++
++// 三段不同形状的 y = a + b 合成一次 launch（bias/residual）。biasN=1 时 b 按行广播。
++// rowsN==0 表示该段跳过。
++void elementwise_add3(Kernel &, int device,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2);
++
++// v2：全内联 kernel + 参数打包（84 B）。同签名；未用段必须传有效设备指针（rows=0 跳过）。
++void elementwise_add3v2(Kernel &, int device,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2);
++
+ // Copy contiguous F32 rows into a strided device output. Pointers must not overlap.
+ // Stride and offset are in F32 elements. Submits work; wait() completes it.
+ void copy_rows(Kernel &, int device, void * dst, const void * src,
+diff --git a/kernels/common-q4/gemv-stream.h b/kernels/common-q4/gemv-stream.h
+index c8d9c46..61134d6 100644
+--- a/kernels/common-q4/gemv-stream.h
++++ b/kernels/common-q4/gemv-stream.h
+@@ -1,3 +1,11 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
++#ifndef Q4_STREAM_MAX_CORES
++#define Q4_STREAM_MAX_CORES 16
++#endif
+ #include "common-q4/source/adapt-gemv/bench/kernels/cdnn_ref.h"
+ #include "common-q4/source/adapt-gemv/experiments/weight-ds/activation-stage.h"
+ #include "common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma-dual16-normal-38ba6b5b.h"
+@@ -30,15 +38,15 @@ template<int cid> static __device__ __attribute__((noinline)) void stream_owner(
+     int engine=cid==0?DMAIN_0:cid==1?DMAIN_1:cid==2?MAC:cid==3?DS_0:cid==4?DS_1:cid==5?EW:cid==6?RS:DMAOUT;
+     int delay=cid==3||cid==4?1:cid==2?2:cid==5?3:cid==6?4:cid==7?5:0;
+ #if Q4_GEMV_NMAJOR
+-        int tasks=((resident+15)/16)*tiles,held=0,pair=0,half=0,base=cache_base;
++        int tasks=((resident+Q4_STREAM_CHUNK-1)/Q4_STREAM_CHUNK)*tiles,held=0,pair=0,half=0,base=cache_base;
+ #else
+-        int tasks=((resident+15)/16)*tiles,held=0,item=0,base=cache_base;
++        int tasks=((resident+Q4_STREAM_CHUNK-1)/Q4_STREAM_CHUNK)*tiles,held=0,item=0,base=cache_base;
+ #endif
+         for(int step=0;step<tasks+5;++step){
+             if(held){STREAM_MEASURE(2,xfence_unlock(engine));held=0;}
+             STREAM_MEASURE(3,sync());
+             int t=step-delay;if(t<0 || t>=tasks)continue;
+-            int count=blocks-base;if(count>16)count=16;
++            int count=blocks-base;if(count>Q4_STREAM_CHUNK)count=Q4_STREAM_CHUNK;
+     #if Q4_GEMV_NMAJOR
+             int buf=t&1,tile=4*(cl+pair*nc)+2*half;
+ #else
+@@ -57,9 +65,9 @@ template<int cid> static __device__ __attribute__((noinline)) void stream_owner(
+             });
+             STREAM_COUNT(5);held=1;
+     #if Q4_GEMV_NMAJOR
+-            if(++half==2){half=0;base+=16;if(base>=cache_base+resident){base=cache_base;++pair;}}
++            if(++half==2){half=0;base+=Q4_STREAM_CHUNK;if(base>=cache_base+resident){base=cache_base;++pair;}}
+ #else
+-            if(++item==tiles){item=0;base+=16;}
++            if(++item==tiles){item=0;base+=Q4_STREAM_CHUNK;}
+ #endif
+         }
+         if(held){STREAM_MEASURE(2,xfence_unlock(engine));}
+@@ -67,7 +75,7 @@ template<int cid> static __device__ __attribute__((noinline)) void stream_owner(
+ __global__ void Q4_STREAM_ENTRY(float *partial,const int8_t *weights,const int8_t *activation,
+  int k,int n,int batch,int first,int rows,int components,int bits,float a0,float a1,float unused,
+  int pipelined,const unsigned short *scales,int fold,const float *device_scales) {
+-    if(batch!=1 || fold || !pipelined || core_num()!=8 || components!=2 || bits!=8 ||
++    if(batch!=1 || fold || !pipelined || (core_num()!=8 && core_num()!=Q4_STREAM_MAX_CORES) || components!=2 || bits!=8 ||
+        n%256 || rows%256 || k<512 || k>16384 || k%256 || first!=0 || Q4_ACT_CACHE_BLOCKS>128)return;
+     __local__ __attribute__((aligned(64))) float act_parameters[16];
+     int cid=core_id(),cl=cluster_id(),nc=cluster_num(),blocks=k/32;
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/ew_group-base-normal-9c3f8f1a.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/ew_group-base-normal-9c3f8f1a.h
+index a972fc4..221c34d 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/ew_group-base-normal-9c3f8f1a.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/ew_group-base-normal-9c3f8f1a.h
+@@ -1,5 +1,10 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void ew_group(int buf,int count,int batch,int fold,int slot) {
+-    v16f32 *e=&((v16f32 *)0)[buf*128],*s=&((v16f32 *)0)[256+slot*64];
++    v16f32 *e=&((v16f32 *)0)[buf*(Q4_STREAM_CHUNK*8)],*s=&((v16f32 *)0)[Q4_STREAM_CHUNK*16+slot*(Q4_STREAM_CHUNK*4)];
+     ew_cfg_activation_type(EW_NOACT);ew_cfg_coeff_scalar(0.f,0.f,1.f);
+     ew_cfg_findmax(0,0.f);ew_cfg_stream_size(count*4);ew_cfg_col_size(NBANKS);
+     ew_dsmul(e,e,s,EW_L2E);
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/mac_group-batch16-normal-584ec4a6.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/mac_group-batch16-normal-584ec4a6.h
+index b6316db..ec3b74b 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/mac_group-batch16-normal-584ec4a6.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/mac_group-batch16-normal-584ec4a6.h
+@@ -1,13 +1,18 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void mac_group(int buf,int count,int batch,float a0,float a1,int activation_base=0) {
+-    v16f32 *e=&((v16f32 *)0)[buf*128];
++    v16f32 *e=&((v16f32 *)0)[buf*(Q4_STREAM_CHUNK*8)];
+     mm_cfg_stride(1);mm_cfg_basic_int8(32,1,count);
+     for(int b=0;b<count;++b){
+-        v32i8 *w=&((v32i8 *)0)[buf*512+b*16];
++        v32i8 *w=&((v32i8 *)0)[buf*(Q4_STREAM_CHUNK*32)+b*16];
+         mm_cfg_dequant_scale(a0);
+         mm_int4(&e[b],&((v32i8 *)0)[(activation_base+b)*128],w,MAC_INT8_D8W4);
+-        mm_int4(&e[count*2+b],&((v32i8 *)0)[(activation_base+b)*128],&w[256],MAC_INT8_D8W4);
++        mm_int4(&e[count*2+b],&((v32i8 *)0)[(activation_base+b)*128],&w[Q4_STREAM_CHUNK*16],MAC_INT8_D8W4);
+         mm_cfg_dequant_scale(a1);
+         mm_acc_int4(&e[b],&((v32i8 *)0)[(activation_base+b)*128+64],w,MAC_INT8_D8W4);
+-        mm_acc_int4(&e[count*2+b],&((v32i8 *)0)[(activation_base+b)*128+64],&w[256],MAC_INT8_D8W4);
++        mm_acc_int4(&e[count*2+b],&((v32i8 *)0)[(activation_base+b)*128+64],&w[Q4_STREAM_CHUNK*16],MAC_INT8_D8W4);
+     }
+ }
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/output_dma-base-normal-124c2a3c.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/output_dma-base-normal-124c2a3c.h
+index 181efe4..5926ff3 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/output_dma-base-normal-124c2a3c.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/output_dma-base-normal-124c2a3c.h
+@@ -1,3 +1,8 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void output_dma(_global_ptr_ float *out,int buf,int count,int batch,int blocks) {
+     // Preserve the original [N32 tile,K32 block,32] partial layout. Source
+     // strides are 256B; destination strides 128B. Each starting address is 64B aligned.
+@@ -5,6 +10,6 @@ static inline __device__ void output_dma(_global_ptr_ float *out,int buf,int cou
+         _global_ptr_ float *p=gptr_f32(out,(long long)h*blocks*32);
+         dma_cfg(DMA_GM|DMA_FP32|highptr(p),DMA_L2R|DMA_FP32,0.f);
+         dma_cfg_2d(count,128,256);
+-        dma_o_2d(lowptr(p),(v16f32 *)(buf*8192+h*128),128);
++        dma_o_2d(lowptr(p),(v16f32 *)(buf*(Q4_STREAM_CHUNK*512)+h*(Q4_STREAM_CHUNK*8)),128);
+     }
+ }
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/rs_group-base-normal-9099e3a9.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/rs_group-base-normal-9099e3a9.h
+index 8215f5c..68bbb88 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/rs_group-base-normal-9099e3a9.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/rs_group-base-normal-9099e3a9.h
+@@ -1,5 +1,10 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void rs_group(int buf,int count,int batch) {
+-    v16f32 *e=&((v16f32 *)0)[buf*128];v16f32 *r=(v16f32 *)(buf*8192);
++    v16f32 *e=&((v16f32 *)0)[buf*(Q4_STREAM_CHUNK*8)];v16f32 *r=(v16f32 *)(buf*(Q4_STREAM_CHUNK*512));
+     rs_row_cfg_stride(1,4);rs_row_cfg_loop(count);
+     for(int i=0;i<4;++i)rs_row_batch(&r[i][0],&e[i*count][0],NBANKS);
+ }
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_dma-dual16-normal-0119e532.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_dma-dual16-normal-0119e532.h
+index 443800e..108b5ee 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_dma-dual16-normal-0119e532.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_dma-dual16-normal-0119e532.h
+@@ -1,8 +1,13 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void scale_dma(_global_ptr_ const unsigned short *s,int buf,int count,int blocks) {
+     for(int h=0;h<2;++h){
+         _global_ptr_ const unsigned short *p=(_global_ptr_ const unsigned short *)gptr_i16((_global_ptr_ const int16_t *)s,(long long)h*blocks*32);
+         dma_cfg(DMA_L2_1|DMA_FP32,DMA_GM|DMA_FP16|highptr(p),0.f);
+-        dma_i((float *)(16384+buf*4096+h*2048),lowptr(p),count*64);
++        dma_i((float *)(Q4_STREAM_CHUNK*1024+buf*(Q4_STREAM_CHUNK*256)+h*(Q4_STREAM_CHUNK*128)),lowptr(p),count*64);
+     }
+ }
+ 
+@@ -10,14 +15,14 @@ static inline __device__ void commonv_s_dma(_global_ptr_ const unsigned short* s
+ #if GEMV_CACHE128
+     if(item%2==0){
+         _global_ptr_ const unsigned short* p=(_global_ptr_ const unsigned short*)gptr_i16((_global_ptr_ const int16_t*)scales,(long long)kb*n+n0);
+-        dma_cfg(DMA_L2_1|DMA_FP32,DMA_GM|DMA_FP16|highptr(p),0.f);dma_cfg_2d(count,512,n*2);dma_i_2d((float*)(16384+((item/2)&1)*8192),lowptr(p),256);
++        dma_cfg(DMA_L2_1|DMA_FP32,DMA_GM|DMA_FP16|highptr(p),0.f);dma_cfg_2d(count,512,n*2);dma_i_2d((float*)(Q4_STREAM_CHUNK*1024+((item/2)&1)*(Q4_STREAM_CHUNK*512)),lowptr(p),256);
+     }
+ #elif COMMON_SCALE==0
+     scale_dma((_global_ptr_ const unsigned short*)gptr_i16((_global_ptr_ const int16_t*)scales,((long long)(n0/32)*(k/32)+kb)*32),buf,count,k/32);
+ #else
+     for(int h=0;h<2;++h){
+         _global_ptr_ const unsigned short* p=(_global_ptr_ const unsigned short*)gptr_i16((_global_ptr_ const int16_t*)scales,(long long)kb*n+n0+h*32);
+-        dma_cfg(DMA_L2_1|DMA_FP32,DMA_GM|DMA_FP16|highptr(p),0.f);dma_cfg_2d(count,128,n*2);dma_i_2d((float*)(16384+buf*4096+h*2048),lowptr(p),64);
++        dma_cfg(DMA_L2_1|DMA_FP32,DMA_GM|DMA_FP16|highptr(p),0.f);dma_cfg_2d(count,128,n*2);dma_i_2d((float*)(Q4_STREAM_CHUNK*1024+buf*(Q4_STREAM_CHUNK*256)+h*(Q4_STREAM_CHUNK*128)),lowptr(p),64);
+     }
+ #endif
+ }
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_ds-dual16-normal-d68effc0.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_ds-dual16-normal-d68effc0.h
+index 3317f53..fd1bd68 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_ds-dual16-normal-d68effc0.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/scale_ds-dual16-normal-d68effc0.h
+@@ -1,18 +1,23 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void scale_ds(int buf,int count,int batch,int slot) {
+     weight_ds_second(buf,count);
+-    v16f32 *s=&((v16f32 *)0)[256+slot*64];
++    v16f32 *s=&((v16f32 *)0)[Q4_STREAM_CHUNK*16+slot*(Q4_STREAM_CHUNK*4)];
+     ds_shuffle_cfg_datatype(DS_FP32);ds_shuffle_cfg_blkx(32);ds_cfg_output_bank(NBANKS);
+     for(int h=0;h<2;++h)for(int i=0;i<2;++i){
+-        float *p=(float *)(16384+buf*4096+h*2048);
++        float *p=(float *)(Q4_STREAM_CHUNK*1024+buf*(Q4_STREAM_CHUNK*256)+h*(Q4_STREAM_CHUNK*128));
+         ds_shuffle_coa(count,&s[(h*2+i)*count][0],p+i*16,DS_L1E);
+     }
+ }
+ 
+ static inline __device__ void commonv_scale_ds(int buf,int count,int batch,int slot,int item){
+ #if GEMV_CACHE128
+-    weight_ds_second(buf,count);v16f32* s=&((v16f32*)0)[256+slot*64];
++    weight_ds_second(buf,count);v16f32* s=&((v16f32*)0)[Q4_STREAM_CHUNK*16+slot*(Q4_STREAM_CHUNK*4)];
+     ds_shuffle_cfg_datatype(DS_FP32);ds_shuffle_cfg_blkx(128);ds_cfg_output_bank(NBANKS);
+-    for(int h=0;h<2;++h)for(int i=0;i<2;++i)ds_shuffle_coa(count,&s[(h*2+i)*count][0],(float*)(16384+((item/2)&1)*8192)+((item%2)*64+h*32+i*16),DS_L1E);
++    for(int h=0;h<2;++h)for(int i=0;i<2;++i)ds_shuffle_coa(count,&s[(h*2+i)*count][0],(float*)(Q4_STREAM_CHUNK*1024+((item/2)&1)*(Q4_STREAM_CHUNK*512))+((item%2)*(Q4_STREAM_CHUNK*4)+h*32+i*16),DS_L1E);
+ #else
+     scale_ds(buf,count,batch,slot);
+ #endif
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma-dual16-normal-38ba6b5b.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma-dual16-normal-38ba6b5b.h
+index e1af408..132fb22 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma-dual16-normal-38ba6b5b.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma-dual16-normal-38ba6b5b.h
+@@ -1,7 +1,12 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void weight_dma(_global_ptr_ const int8_t *w,int buf,int count,int blocks) {
+     for(int h=0;h<1;++h){
+         _global_ptr_ const int8_t *p=gptr_i8(w,(long long)h*blocks*512);
+         dma_cfg(DMA_L2_0|DMA_INT8,DMA_GM|DMA_INT8|highptr(p),0.f);
+-        dma_i((int8_t *)(buf*16384+h*8192),lowptr(p),count*512);
++        dma_i((int8_t *)(buf*(Q4_STREAM_CHUNK*1024)+h*(Q4_STREAM_CHUNK*512)),lowptr(p),count*512);
+     }
+ }
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma_second-dual16-normal-a8574bc2.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma_second-dual16-normal-a8574bc2.h
+index 00796a0..9e38941 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma_second-dual16-normal-a8574bc2.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_dma_second-dual16-normal-a8574bc2.h
+@@ -1,5 +1,10 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void weight_dma_second(_global_ptr_ const int8_t *w,int buf,int count,int blocks) {
+     _global_ptr_ const int8_t *p=gptr_i8(w,(long long)blocks*512);
+     dma_cfg(DMA_L2_1|DMA_INT8,DMA_GM|DMA_INT8|highptr(p),0.f);
+-    dma_i((int8_t *)(buf*8192),lowptr(p),count*512);
++    dma_i((int8_t *)(buf*(Q4_STREAM_CHUNK*512)),lowptr(p),count*512);
+ }
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds-dual16-normal-65ea075b.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds-dual16-normal-65ea075b.h
+index 5717fa0..68f9dbc 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds-dual16-normal-65ea075b.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds-dual16-normal-65ea075b.h
+@@ -1,10 +1,15 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void weight_ds(int buf,int count){
+     ds_shuffle_cfg_datatype(DS_INT16);ds_cfg_output_bank(NBANKS);
+ #if COMMON_LAYOUT==2
+-    ds_shuffle_cfg_blkx(count*16);ds_shuffle_batch(&((v32i8*)0)[buf*512][0],(int8_t*)(buf*16384),count*16,DS_L1W);
++    ds_shuffle_cfg_blkx(count*16);ds_shuffle_batch(&((v32i8*)0)[buf*(Q4_STREAM_CHUNK*32)][0],(int8_t*)(buf*(Q4_STREAM_CHUNK*1024)),count*16,DS_L1W);
+ #elif COMMON_LAYOUT==1
+-    ds_shuffle_cfg_blkx(16);for(int b=0;b<count;++b)ds_shuffle_batch(&((v32i8*)0)[buf*512+b*16][0],(int8_t*)(buf*16384+b*512),16,DS_L1W);
++    ds_shuffle_cfg_blkx(16);for(int b=0;b<count;++b)ds_shuffle_batch(&((v32i8*)0)[buf*(Q4_STREAM_CHUNK*32)+b*16][0],(int8_t*)(buf*(Q4_STREAM_CHUNK*1024)+b*512),16,DS_L1W);
+ #else
+-    ds_shuffle_cfg_blkx(16);ds_shuffle_coa(count*16,&((v32i8*)0)[buf*512][0],(int8_t*)(buf*16384),DS_L1W);
++    ds_shuffle_cfg_blkx(16);ds_shuffle_coa(count*16,&((v32i8*)0)[buf*(Q4_STREAM_CHUNK*32)][0],(int8_t*)(buf*(Q4_STREAM_CHUNK*1024)),DS_L1W);
+ #endif
+ }
+diff --git a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds_second-dual16-normal-cca2785d.h b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds_second-dual16-normal-cca2785d.h
+index 69e8d81..159d554 100644
+--- a/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds_second-dual16-normal-cca2785d.h
++++ b/kernels/common-q4/source/adapt-gemv/experiments/weight-ds/transfers/weight_ds_second-dual16-normal-cca2785d.h
+@@ -1,10 +1,15 @@
++// DMA/weight staging chunk, in 32-element K blocks. Weight component slot is
++// CHUNK*1024 bytes; buffers, scales and outputs all scale with it.
++#ifndef Q4_STREAM_CHUNK
++#define Q4_STREAM_CHUNK 16
++#endif
+ static inline __device__ void weight_ds_second(int buf,int count){
+     ds_shuffle_cfg_datatype(DS_INT16);ds_cfg_output_bank(NBANKS);
+ #if COMMON_LAYOUT==2
+-    ds_shuffle_cfg_blkx(count*16);ds_shuffle_batch(&((v32i8*)0)[buf*512+256][0],(int8_t*)(buf*8192),count*16,DS_L1W);
++    ds_shuffle_cfg_blkx(count*16);ds_shuffle_batch(&((v32i8*)0)[buf*(Q4_STREAM_CHUNK*32)+Q4_STREAM_CHUNK*16][0],(int8_t*)(buf*(Q4_STREAM_CHUNK*512)),count*16,DS_L1W);
+ #elif COMMON_LAYOUT==1
+-    ds_shuffle_cfg_blkx(16);for(int b=0;b<count;++b)ds_shuffle_batch(&((v32i8*)0)[buf*512+256+b*16][0],(int8_t*)(buf*8192+b*512),16,DS_L1W);
++    ds_shuffle_cfg_blkx(16);for(int b=0;b<count;++b)ds_shuffle_batch(&((v32i8*)0)[buf*(Q4_STREAM_CHUNK*32)+Q4_STREAM_CHUNK*16+b*16][0],(int8_t*)(buf*(Q4_STREAM_CHUNK*512)+b*512),16,DS_L1W);
+ #else
+-    ds_shuffle_cfg_blkx(16);ds_shuffle_coa(count*16,&((v32i8*)0)[buf*512+256][0],(int8_t*)(buf*8192),DS_L1W);
++    ds_shuffle_cfg_blkx(16);ds_shuffle_coa(count*16,&((v32i8*)0)[buf*(Q4_STREAM_CHUNK*32)+Q4_STREAM_CHUNK*16][0],(int8_t*)(buf*(Q4_STREAM_CHUNK*512)),DS_L1W);
+ #endif
+ }
+diff --git a/kernels/kunlun-common-sum-fast.xpu b/kernels/kunlun-common-sum-fast.xpu
+index 51ca9d9..e43d145 100644
+--- a/kernels/kunlun-common-sum-fast.xpu
++++ b/kernels/kunlun-common-sum-fast.xpu
+@@ -7,7 +7,7 @@
+ // Mode 1 is the already-scaled K32 partial path, with unchanged serial FP32 sums.
+ __global__ void q4_sum_fast(float *out,const float *partial,const unsigned short *scales,
+                          int k,int n,int batch,int first,int rows,int mode){
+-    if(batch!=1 || first || rows!=n || mode!=1 || k<=0 || k>16384 || k%32 || n<=0 || n>11008 || n%32)return;
++    if(batch!=1 || first || rows!=n || mode!=1 || k<=0 || k>16384 || k%32 || n<=0 || n>16384 || n%32)return;
+     __local__ __attribute__((aligned(64))) float v[SUM_CHUNK*32],sum[32];
+     int tid=cluster_id()*core_num()+core_id(),step=cluster_num()*core_num(),blocks=k/32;
+     for(int tile=tid;tile<rows/32;tile+=step){
+diff --git a/src/attention.inc b/src/attention.inc
+index 47c679f..790a73a 100644
+--- a/src/attention.inc
++++ b/src/attention.inc
+@@ -1,6 +1,26 @@
+ #include <chrono>
+ #include "../kernels/attention-config.h"
+ 
++// ---- ROPE phase table reuse (opt-in, graph-scoped) ----------------------
++static long rope_generation = 0;
++static long rope_phase_hits = 0;
++struct RopePhaseKey {
++    long gen = -1;
++    int id = -1;
++    const void * positions = nullptr;
++    int n_dims = 0, mode = 0, n_offs = 0, tokens = 0;
++    float theta_scale = 0, freq_scale = 0, attn_factor = 0;
++    void * scratch = nullptr;
++};
++static RopePhaseKey rope_phase_cache[2];
++static bool rope_reuse_enabled() {
++    static const bool v = [] {
++        const char * e = std::getenv("KUNLUN_ROPE_PHASE_REUSE");
++        return e && std::strcmp(e, "1") == 0;
++    }();
++    return v;
++}
++
+ namespace {
+ static_assert(sizeof(KunlunAttentionConfig)==160,"Attention launch ABI");
+ int tensor4_bytes(const Tensor4Layout &p) { return p.type==InputType::f16?2:4; }
+@@ -55,7 +75,7 @@ const void *attention_pack(Kernel::Impl &parent,Kernel::Impl *Kernel::Impl::*mem
+         attention_launch(state,id,"kunlun-attention-pack",cfg,{state.scratch,x});
+     } else {
+         size_t count=tensor4_count(layout),half_bytes=count*2;
+-        if(!state.vendor){select(id);state.vendor=xdnn::create_context();require(state.vendor);state.vendor->set_ncluster(4);}
++        if(!state.vendor){select(id);state.vendor=xdnn::create_context();require(state.vendor);state.vendor->set_ncluster(ncluster_count());}
+         bool contiguous=true;int stride=tensor4_bytes(layout);
+         for(int d=0;d<4;++d){if(layout.ne[d]>1 && layout.nb[d]!=stride)contiguous=false;stride*=layout.ne[d];}
+         auto half_buffer=[&]{if(state.quant_size<half_bytes){release(id,state.quant,state.quant_size);state.quant=allocate(id,half_bytes);state.quant_size=half_bytes;require(state.quant);}};
+@@ -103,7 +123,7 @@ const void *attention_half(Kernel::Impl &parent,Kernel::Impl *Kernel::Impl::*mem
+         if(prep_trace){auto now=std::chrono::steady_clock::now();std::fprintf(stderr,"PREP_STAGE stage=gather type=%d bytes=%zu ms=%.6f\n",(int)layout.type,size,std::chrono::duration<double,std::milli>(now-tick).count());tick=now;}
+     }
+     if(layout.type==InputType::f32){
+-        if(!state.vendor){select(id);state.vendor=xdnn::create_context();require(state.vendor);state.vendor->set_ncluster(4);}
++        if(!state.vendor){select(id);state.vendor=xdnn::create_context();require(state.vendor);state.vendor->set_ncluster(ncluster_count());}
+         check(xdnn::cast<float,float16>(state.vendor,(const float*)source,(float16*)state.quant,(int)count));if(!defer || prep_trace || state.vendor->get_stream()!=nullptr)check(xpu_wait(state.vendor->get_stream()));
+         if(prep_trace){auto now=std::chrono::steady_clock::now();std::fprintf(stderr,"PREP_STAGE stage=cast elements=%zu ms=%.6f\n",count,std::chrono::duration<double,std::milli>(now-tick).count());tick=now;}
+     }
+@@ -167,7 +187,7 @@ bool attention_matmul(Kernel &kernel,int id,void *y,size_t yb,const void *a,size
+         int stride=2;
+         if(tensor4_span(pa)!=tensor4_count(pa)*2){a=attention_half(*kernel.impl_,&Kernel::Impl::attention_pack_a,id,a,pa,pipe);stride=2;for(int d=0;d<4;++d){pa.nb[d]=stride;stride*=pa.ne[d];}}
+         trace("A_prepare");
+-        if(!state.vendor){select(id);state.vendor=xdnn::create_context();require(state.vendor);state.vendor->set_ncluster(4);}
++        if(!state.vendor){select(id);state.vendor=xdnn::create_context();require(state.vendor);state.vendor->set_ncluster(ncluster_count());}
+         if(!state.input_max){state.input_max=allocate(id,1024);require(state.input_max);}
+         trace("workspace");
+         check(xdnn::findmax<float16>(state.vendor,(const float16*)a,(float*)state.input_max,(int)tensor4_count(pa)));
+@@ -270,23 +290,40 @@ bool attention_rope(Kernel &kernel,int id,void *y,size_t yb,const void *x,size_t
+     if(!tensor4_pointer(y,yb,p.y) || !tensor4_pointer(x,xb,p.x) || !positions || (uintptr_t)positions%4 || pb<(size_t)p.x.ne[2]*4 || (uintptr_t)positions+pb<(uintptr_t)positions)return false;
+     if(tensor4_overlap(y,p.y,x,p.x) && !(y==x && tensor4_same(p.x,p.y)))return false;
+     uintptr_t yp=(uintptr_t)y,pp=(uintptr_t)positions;if(yp<pp+pb && pp<yp+tensor4_span(p.y))return false;
+-    // Bound range reduction before submitting either RoPE kernel. Only position IDs are read back.
+-    std::vector<int32_t> pos(p.x.ne[2]);select(id);check(xpu_memcpy(pos.data(),positions,pos.size()*4,XPU_DEVICE_TO_HOST));check(xpu_wait());
+-    bool host_trig=false;for(int32_t value:pos)host_trig=host_trig || std::abs(double(value)*p.freq_scale)>32768;
+     auto cfg=attention_config(p.y,p.x);cfg.n_dims=p.n_dims;cfg.n_offs=p.n_offs;cfg.mode=p.mode;
+     cfg.theta_scale=std::pow(p.freq_base,-2.0f/p.n_dims);cfg.freq_scale=p.freq_scale;cfg.attn_factor=p.attn_factor;
+     auto &phase=attention_program(*kernel.impl_,&Kernel::Impl::attention_phase,id);
+     auto &rotate=attention_program(*kernel.impl_,&Kernel::Impl::attention_rope,id);
+     size_t size=(size_t)p.n_dims*p.x.ne[2]*4;
+     if(phase.scratch_size<size){release(id,phase.scratch,phase.scratch_size);phase.scratch=allocate(id,size);phase.scratch_size=size;require(phase.scratch);}
+-    if(host_trig) {
+-        std::vector<float> trig((size_t)p.n_dims*p.x.ne[2]);
+-        for(int t=0;t<p.x.ne[2];++t){float theta=(float)pos[t];for(int j=0;j<p.n_dims/2;++j){float angle=theta*p.freq_scale;trig[(size_t)t*p.n_dims+2*j]=std::cos(angle)*p.attn_factor;trig[(size_t)t*p.n_dims+2*j+1]=std::sin(angle)*p.attn_factor;theta*=cfg.theta_scale;}}
+-        select(id);check(xpu_memcpy(phase.scratch,trig.data(),size,XPU_HOST_TO_DEVICE));check(xpu_wait());++kernel.impl_->attention_host_trig;
+-    } else attention_launch(phase,id,"kunlun-attention-rope-phase",cfg,{phase.scratch,positions});
++    // q and k RoPE share an identical trig table within one graph; phase.scratch
++    // is private to this function, so reuse is exact (no numerical change).
++    const long gen=rope_generation;
++    RopePhaseKey &key=rope_phase_cache[id];
++    const bool reuse = rope_reuse_enabled() && key.gen==gen && key.id==id &&
++        key.positions==positions && key.n_dims==p.n_dims && key.mode==p.mode &&
++        key.n_offs==p.n_offs && key.tokens==p.x.ne[2] &&
++        key.theta_scale==cfg.theta_scale && key.freq_scale==cfg.freq_scale &&
++        key.attn_factor==cfg.attn_factor && key.scratch==phase.scratch;
++    if(!reuse) {
++        std::vector<int32_t> pos(p.x.ne[2]);select(id);
++        check(xpu_memcpy(pos.data(),positions,pos.size()*4,XPU_DEVICE_TO_HOST));check(xpu_wait());
++        bool host_trig=false;for(int32_t value:pos)host_trig=host_trig || std::abs(double(value)*p.freq_scale)>32768;
++        if(host_trig) {
++            std::vector<float> trig((size_t)p.n_dims*p.x.ne[2]);
++            for(int t=0;t<p.x.ne[2];++t){float theta=(float)pos[t];for(int j=0;j<p.n_dims/2;++j){float angle=theta*p.freq_scale;trig[(size_t)t*p.n_dims+2*j]=std::cos(angle)*p.attn_factor;trig[(size_t)t*p.n_dims+2*j+1]=std::sin(angle)*p.attn_factor;theta*=cfg.theta_scale;}}
++            select(id);check(xpu_memcpy(phase.scratch,trig.data(),size,XPU_HOST_TO_DEVICE));check(xpu_wait());++kernel.impl_->attention_host_trig;
++        } else attention_launch(phase,id,"kunlun-attention-rope-phase",cfg,{phase.scratch,positions});
++        key.gen=gen;key.id=id;key.positions=positions;key.n_dims=p.n_dims;key.mode=p.mode;
++        key.n_offs=p.n_offs;key.tokens=p.x.ne[2];key.theta_scale=cfg.theta_scale;
++        key.freq_scale=cfg.freq_scale;key.attn_factor=cfg.attn_factor;key.scratch=phase.scratch;
++    } else ++rope_phase_hits;
+     attention_launch(rotate,id,"kunlun-attention-rope",cfg,{y,x,phase.scratch});check(xpu_wait());++kernel.impl_->attention_calls[3];return true;
+ }
++void rope_next_graph(int id) { if (id == 0) ++rope_generation; }
++
+ AttentionStatistics attention_statistics(const Kernel &kernel) {
++    std::fprintf(stderr, "KUNLUN ROPE phase reuse hits=%ld\n", rope_phase_hits);
+     std::lock_guard<std::recursive_mutex> lock(mutex);auto *p=kernel.impl_;
+     size_t bytes=p->attention_phase?p->attention_phase->scratch_size:0;
+     for(auto *state:{p->attention_pack_a,p->attention_pack_b,p->attention_range,p->attention_range_dma,p->attention_sd,p->attention_mm,p->attention_sm_fast,p->attention_sm_typed,p->attention_sm,p->attention_cp,p->attention_phase,p->attention_rope})if(state)bytes+=state->alias_input_size+state->quant_size+state->correction_size+(state->input_max?1024:0)+((state==p->attention_pack_a || state==p->attention_pack_b)?state->scratch_size:0);
+diff --git a/src/flash.inc b/src/flash.inc
+index 315c521..ee778da 100644
+--- a/src/flash.inc
++++ b/src/flash.inc
+@@ -129,13 +129,13 @@ bool flash_attention(Kernel &kernel,int id,void *y,size_t yb,const void *q,size_
+             auto cfg=attention_config(flat,layout);attention_launch(state,id,"kunlun-attention-copy",cfg,{state.scratch,src});input=state.scratch;
+         }
+         if(layout.type==InputType::f32){if(state.quant_size<count*2){release(id,state.quant,state.quant_size);state.quant=allocate(id,count*2);state.quant_size=count*2;require(state.quant);}
+-            if(!s.vendor){s.vendor=xdnn::create_context();require(s.vendor);s.vendor->set_ncluster(4);}
++            if(!s.vendor){s.vendor=xdnn::create_context();require(s.vendor);s.vendor->set_ncluster(ncluster_count());}
+             check(xdnn::cast<float,float16>(s.vendor,(const float*)input,(float16*)state.quant,(int)count));input=state.quant;
+         }
+         layout.type=InputType::f16;stride=2;for(int d=0;d<4;++d){layout.nb[d]=stride;stride*=layout.ne[d];}return input;
+     };
+     q=half(s.qpack,q,pq);k=half(s.kpack,k,pk);v=half(s.vpack,v,pv);stage("pack_cast");
+-    if(!s.vendor){s.vendor=xdnn::create_context();require(s.vendor);s.vendor->set_ncluster(4);}
++    if(!s.vendor){s.vendor=xdnn::create_context();require(s.vendor);s.vendor->set_ncluster(ncluster_count());}
+     native_reserve(s.peaks,id,1024);native_reserve(s.ranges,id,(size_t)((p.q.ne[1]+flash_query_tile()-1)/flash_query_tile())*p.q.ne[2]*p.q.ne[3]*32);
+     void *vmax=(char*)s.peaks->data()+256;
+     bool max_cached=kv_max_prepare(id,k,pk,v,pv,p.q.ne[1],s.peaks->data(),s.vendor);stage("kv_max_metadata");
+diff --git a/src/get-rows-f32.inc b/src/get-rows-f32.inc
+index c1abfa0..897fcad 100644
+--- a/src/get-rows-f32.inc
++++ b/src/get-rows-f32.inc
+@@ -22,8 +22,10 @@ bool get_rows_f32(Kernel &kernel,int id,void *output,size_t output_bytes,const v
+     }
+     void *status=p.scratch;
+     native_launch(p,{native_arg(output),native_arg(input),native_arg(indices),native_arg(status),native_arg(k),native_arg(n),native_arg(rows),native_arg(chunk)},16);
+-    check(xpu_wait());
+-    int flags[64];check(copy(flags,status,sizeof(flags),device_to_host));check(xpu_wait());
+-    for(int flag:flags)if(flag)return false;
++    maybe_wait();
++    if(!(std::getenv("KUNLUN_SKIP_STATUS") && std::getenv("KUNLUN_SKIP_STATUS")[0]=='1')){
++        int flags[64];check(copy(flags,status,sizeof(flags),device_to_host));check(xpu_wait());
++        for(int flag:flags)if(flag)return false;
++    }
+     return true;
+ }
+diff --git a/src/get-rows.inc b/src/get-rows.inc
+index 0fee051..56008d1 100644
+--- a/src/get-rows.inc
++++ b/src/get-rows.inc
+@@ -19,8 +19,10 @@ bool common_q4_get_rows(Kernel &kernel,int id,void *output,size_t output_bytes,c
+     }
+     const void *weights=weight.data(),*scales=(const char*)weights+a.scale_offset;void *status=p.scratch;
+     native_launch(p,{native_arg(output),native_arg(weights),native_arg(scales),native_arg(indices),native_arg(status),native_arg(a.k),native_arg(a.kp),native_arg(a.np),native_arg(a.n),native_arg(rows),native_arg(chunk)},16);
+-    check(xpu_wait());
+-    int flags[64];check(copy(flags,status,sizeof(flags),device_to_host));check(xpu_wait());
+-    for(int flag:flags)if(flag)return false;
++    maybe_wait();
++    if(!(std::getenv("KUNLUN_SKIP_STATUS") && std::getenv("KUNLUN_SKIP_STATUS")[0]=='1')){
++        int flags[64];check(copy(flags,status,sizeof(flags),device_to_host));check(xpu_wait());
++        for(int flag:flags)if(flag)return false;
++    }
+     return true;
+ }
+diff --git a/src/k200.cpp b/src/k200.cpp
+index 1d39728..5f82426 100644
+--- a/src/k200.cpp
++++ b/src/k200.cpp
+@@ -1,5 +1,6 @@
+ #include <kunlun/k200.h>
+ #include <xpu/runtime.h>
++#include <xpu/runtime_ex.h>
+ #include <xpu/xdnn.h>
+ #include <algorithm>
+ #include <atomic>
+@@ -18,6 +19,43 @@
+ #include <map>
+ #include <deque>
+ #include <stdexcept>
++// KUNLUN_CLUSTERS: number of clusters used at launch (default 4).
++// KL1 has 64 physical threads (4x16), but the Q4 GEMV pipeline binds one
++// hardware engine per core and needs exactly 8 cores, so 8 virtual clusters
++// lets 8 pipelines run at once instead of 4.
++static int ncluster_count() {
++    static int v = -1;
++    if (v < 0) {
++        const char * e = std::getenv("KUNLUN_NCLUSTER");
++        int n = e ? std::atoi(e) : 0;
++        v = (n >= 1 && n <= 16) ? n : 4;
++        if (e) std::fprintf(stderr, "KUNLUN vendor clusters: %d\n", v);
++    }
++    return v;
++}
++
++static int launcher_clusters() {
++    static int cached = -1;
++    if (cached < 0) {
++        const char * e = std::getenv("KUNLUN_CLUSTERS");
++        int v = e ? std::atoi(e) : 0;
++        cached = (v >= 1 && v <= 16) ? v : 4;
++        if (e) std::fprintf(stderr, "KUNLUN launcher clusters: %d\n", cached);
++    }
++    return cached;
++}
++
++
++
++#include <cstdint>
++// Direct vendor gemm_int8 (SD-CDNN). Verified on KL1 / XRE 4.33 / XDNN 20220919:
++// m=1, 32MB int8 weight -> 130 GB/s. B is [n][k] rowwise int8, A stays f32 on device.
++namespace baidu { namespace xpu { namespace api {
++int gemm_int8(Context* ctx, const bool trans_a, const bool trans_b,
++              int m, int n, int k, float alpha,
++              const float* a, int lda, const int8_t* b, float max_b, int ldb,
++              float beta, float* c, int ldc);
++}}}
+ 
+ namespace kunlun {
+ namespace xdnn = baidu::xpu::api;
+@@ -64,8 +102,48 @@ int device_count(int * n) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+     return xpu_device_count(n);
+ }
+-void select(int id) { diagnostic_device=id; require(id >= 0 && id < 2); check(xpu_set_device(id)); }
++void select(int id) {
++    diagnostic_device=id; require(id >= 0 && id < 2); check(xpu_set_device(id));
++    static bool batch_once = []{ if (std::getenv("KUNLUN_BATCH_DISPATCH") && std::getenv("KUNLUN_BATCH_DISPATCH")[0]=='1') { int rc = xpu_disp_set_batch_mode(); if (rc) std::fprintf(stderr, "KUNLUN batch dispatch enable failed rc=%d\n", rc); } return true; }();
++    (void)batch_once;
++}
+ int wait() { return xpu_wait(); }
++void note_launch();
++void drain_launches();
++static bool async_ops() { static bool v = std::getenv("KUNLUN_ASYNC_OPS") && std::getenv("KUNLUN_ASYNC_OPS")[0]=='1'; return v; }
++
++// KUNLUN_ASYNC=1: drop mid-graph synchronization, sync once at graph end.
++bool async_skip() {
++    static const bool v = [] {
++        const char * m = std::getenv("KUNLUN_ASYNC");
++        return m && std::strcmp(m, "1") == 0;
++    }();
++    return v;
++}
++// ---- depth-aware deferred submission -------------------------------------
++// KL1 task queue depth is 16 per PD; libxpurt blocks inside ioctl(LAUNCH) once
++// full. Keep a small budget below that so submissions never stall, and only
++// drain when the pipeline would overflow.
++static int launch_depth() {
++    static const int v = [] {
++        const char *m = std::getenv("KUNLUN_LAUNCH_DEPTH");
++        int n = m ? std::atoi(m) : 0;
++        if (n < 0) n = 0;
++        if (n > 16) n = 16;   // hard cap: driver queue depth
++        return n;
++    }();
++    return v;
++}
++static thread_local int in_flight = 0;
++
++void note_launch() { ++in_flight; }
++void maybe_wait() {
++    if (!async_skip()) { check(xpu_wait()); in_flight = 0; return; }
++    int depth = launch_depth();
++    if (depth <= 0) { check(xpu_wait()); in_flight = 0; return; }
++    if (in_flight >= depth) { check(xpu_wait()); in_flight = 0; }
++}
++void drain_launches() { if (in_flight) { check(xpu_wait()); in_flight = 0; } }
+ int copy(void * dst, const void * src, size_t bytes, CopyKind kind) {
+     require(kind == host_to_device || kind == device_to_host || kind == device_to_device);
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+@@ -86,12 +164,44 @@ void release(int id, void * ptr, size_t bytes) {
+     if (ptr) { select(id); kv_retire(id,ptr,std::max<size_t>(bytes,256)); check(xpu_free(ptr)); allocated[id] -= std::max<size_t>(bytes, 256); }
+ }
+ size_t allocated_bytes(int id) { require(id >= 0 && id < 2); return allocated[id].load(); }
++static int peer_support = -1; /* -1 unknown, 0 unsupported, 1 ok */
++static void * peer_stage = nullptr;
++static size_t peer_stage_bytes = 0;
++static size_t peer_host_copies = 0;
++static int peer_stage_registered = 0;
++
+ void peer(int dst, void * dp, int src, const void * sp, size_t bytes) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+-    select(src); check(xpu_wait()); select(dst);
+-    kv_max_invalidate(dst,dp,bytes);
+-    check(xpu_memcpy_peer(dst, dp, src, const_cast<void *>(sp), bytes));
+-    check(xpu_wait()); ++peer_copies; peer_bytes += bytes;
++    select(src); check(xpu_wait());
++    if (dst == src) {
++        kv_max_invalidate(dst,dp,bytes);
++        check(xpu_memcpy(dp, sp, bytes, XPU_DEVICE_TO_DEVICE));
++        check(xpu_wait()); ++peer_copies; peer_bytes += bytes; return;
++    }
++    select(dst); kv_max_invalidate(dst,dp,bytes);
++    if (peer_support != 0) {
++        int rc = xpu_memcpy_peer(dst, dp, src, const_cast<void *>(sp), bytes);
++        /* The KL1 P2P ioctl is synchronous: dma_device_to_device_p2p() polls
++         * the SSE DMA to completion inside the driver before returning. The
++         * extra xpu_wait() only added a session-sync ioctl (~50-100us) per
++         * copy on the row-split hot path. */
++        if (rc == 0) { ++peer_copies; peer_bytes += bytes; peer_support = 1; return; }
++        peer_support = 0;
++        std::fprintf(stderr, "[kunlun] peer fallback: xpu_memcpy_peer unsupported, host staging\n");
++    }
++    if (peer_stage_bytes < bytes) {
++        if (peer_stage) { if (peer_stage_registered) xpu_host_unregister(peer_stage); std::free(peer_stage); peer_stage = nullptr; peer_stage_registered = 0; peer_stage_bytes = 0; }
++        size_t want = bytes + (bytes >> 2) + 4096;
++        void * raw = nullptr;
++        require(posix_memalign(&raw, 4096, want) == 0 && raw);
++        peer_stage = raw; peer_stage_bytes = want;
++        peer_stage_registered = xpu_host_register(raw, want, 0) == 0;
++    }
++    check(xpu_memcpy(peer_stage, sp, bytes, XPU_DEVICE_TO_HOST));
++    check(xpu_wait());
++    check(xpu_memcpy(dp, peer_stage, bytes, XPU_HOST_TO_DEVICE));
++    check(xpu_wait());
++    ++peer_copies; peer_bytes += bytes; ++peer_host_copies;
+ }
+ Buffer::Buffer(int id, size_t bytes): device_(id), bytes_(bytes), ptr_(allocate(id, bytes)) { require(ptr_); }
+ Buffer::~Buffer() { release(device_, ptr_, bytes_); }
+@@ -124,6 +234,7 @@ void upload_i8_rows(int id, void * weights, int k, int n, int first, int count,
+ struct Kernel::Impl {
+     std::shared_ptr<void> flash;
+     Impl * elementwise = nullptr;
++    Impl * elementwise2 = nullptr;
+     Impl * broadcast = nullptr;
+     Impl * swiglu = nullptr;
+     Impl * attention_pack_a=nullptr,*attention_pack_b=nullptr;
+@@ -181,12 +292,41 @@ void combine_mv(Kernel::Impl & parent, int id, void * y, const void * products,
+         check(xpu_launch_argument_set(arg,8,offset)); offset+=8;
+     }
+     for (const int * arg : {&n,&batch}) { check(xpu_launch_argument_set(arg,4,offset)); offset+=4; }
+-    check(xpu_launch_config(4,8)); check(xpu_launch_async(fn.fn));
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn));
+ }
+ 
+ void launch_mv(Kernel::Impl & fn, int id, void * y, const void * w, const void * x, int k, int n, int batch, int type, const float * row_scales, const float * weight_max, int tile) {
+     select(id); fn.id = id;
+     if (type == 3) {
++        const char * direct = std::getenv("KUNLUN_I8_GEMM");
++        if (direct && std::strcmp(direct, "1") == 0) {
++            static xdnn::Context * i8_ctx[2] = {nullptr, nullptr};
++            if (!i8_ctx[id]) {
++                i8_ctx[id] = new xdnn::Context(xdnn::Device(xdnn::kXPU1, id));
++                require(i8_ctx[id]);
++                i8_ctx[id]->set_ncluster(ncluster_count());
++            }
++            int i8_rc = baidu::xpu::api::gemm_int8(i8_ctx[id], false, true, batch, n, k, 1.0f,
++                        (const float *)x, k, (const int8_t *)w, 127.0f, k,
++                        0.0f, (float *)y, n);
++            int i8_rc2 = -1;
++            if (i8_rc == 0) {
++                i8_rc2 = xdnn::broadcast_mul<float>(i8_ctx[id], (const float *)y, row_scales, (float *)y, {batch, n}, {1, n});
++            }
++            if (k > 16384) {
++                static std::atomic<int> wide_logged{0};
++                if (wide_logged.fetch_add(1) < 8)
++                    std::fprintf(stderr, "[I8WIDE] pd=%d M=%d N=%d K=%d gemm_rc=%d bmul_rc=%d ptr(x)=%p ptr(w)=%p ptr(y)=%p scales=%p\n",
++                                 id, batch, n, k, i8_rc, i8_rc2, (const void*)x, w, y, (const void*)row_scales);
++            }
++            check(i8_rc);
++            check(i8_rc2);
++            static std::atomic<int> i8_gemm_logged{0};
++            if (!i8_gemm_logged.fetch_add(1))
++                std::fprintf(stderr, "KUNLUN I8 GEMM direct PD%d: K=%d N=%d M=%d (vendor gemm_int8 + rowwise scale)\n", id, k, n, batch);
++            ++matmuls[id];
++            return;
++        }
+         const char * mode=std::getenv("KUNLUN_GEMV");
+         bool packed=(!mode || std::strcmp(mode,"auto") == 0) ? batch <= 8 : std::strcmp(mode,"fused") == 0;
+         bool fused=packed && n <= INT_MAX/8/batch;
+@@ -194,7 +334,7 @@ void launch_mv(Kernel::Impl & fn, int id, void * y, const void * w, const void *
+             if (!fn.combine) fn.combine=new Kernel::Impl{};
+             load_kernel(*fn.combine,"kunlun-combine",id);
+         }
+-        if (!fn.vendor) { fn.vendor=xdnn::create_context(); require(fn.vendor); fn.vendor->set_ncluster(4); }
++        if (!fn.vendor) { fn.vendor=xdnn::create_context(); require(fn.vendor); fn.vendor->set_ncluster(ncluster_count()); }
+         {
+             size_t count = (size_t)k*batch, stride = aligned(count), qs = 2*stride, ys = (size_t)n*batch*4;
+             size_t cs=fused ? 2*ys : ys, correction_offset=fused ? count : stride;
+@@ -243,13 +383,13 @@ void launch_mv(Kernel::Impl & fn, int id, void * y, const void * w, const void *
+     size_t offset = 0;
+     for (const void * arg : { (const void *)&y, (const void *)&w, (const void *)&x }) { check(xpu_launch_argument_set(arg, 8, offset)); offset += 8; }
+     for (const int * arg : { &k, &n, &batch, &type, &tile }) { check(xpu_launch_argument_set(arg, 4, offset)); offset += 4; }
+-    check(xpu_launch_config(4, 8)); check(xpu_launch_async(fn.fn)); ++matmuls[id];
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn)); ++matmuls[id];
+ }
+ 
+ Kernel::Kernel(): impl_(new Impl{}) {}
+ Kernel::~Kernel() {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+-    for (auto * state : {impl_->elementwise,impl_->broadcast,impl_->swiglu,impl_->attention_pack_a,impl_->attention_pack_b,impl_->attention_range,impl_->attention_range_dma,impl_->attention_sd,impl_->attention_sm_fast,impl_->attention_sm_typed,impl_->attention_mm,impl_->attention_sm,impl_->attention_cp,impl_->attention_phase,impl_->attention_rope,impl_->get_rows,impl_->get_rows_f32,impl_->copy_rows,impl_->set_rows,impl_->flash_set_rows,impl_->rms_partial,impl_->rms_output,impl_->combine,impl_}) {
++    for (auto * state : {impl_->elementwise,impl_->elementwise2,impl_->broadcast,impl_->swiglu,impl_->attention_pack_a,impl_->attention_pack_b,impl_->attention_range,impl_->attention_range_dma,impl_->attention_sd,impl_->attention_sm_fast,impl_->attention_sm_typed,impl_->attention_mm,impl_->attention_sm,impl_->attention_cp,impl_->attention_phase,impl_->attention_rope,impl_->get_rows,impl_->get_rows_f32,impl_->copy_rows,impl_->set_rows,impl_->flash_set_rows,impl_->rms_partial,impl_->rms_output,impl_->combine,impl_}) {
+         if (!state) continue;
+         auto & p=*state;
+         if (p.id >= 0) {
+@@ -265,11 +405,33 @@ Kernel::~Kernel() {
+         delete state;
+     }
+ }
++/* MoE expert matmul on the vendor path: one int8 GEMV + rowwise scale.
++   y[n] = (W_int8[e][n][k] @ x[k]) * scales[n]   -- single token (m == 1). */
++bool moe_i8_matmul(int id, void * y, const void * w_i8, const float * scales, const void * x, int k, int n) {
++    static xdnn::Context * moe_ctx[2] = {nullptr, nullptr};
++    if (id < 0 || id > 1) return false;
++    select(id);   /* the vendor API targets the CURRENT device, not the Context's */
++    if (!moe_ctx[id]) {
++        moe_ctx[id] = new xdnn::Context(xdnn::Device(xdnn::kXPU1, id));
++        if (!moe_ctx[id]) return false;
++        moe_ctx[id]->set_ncluster(ncluster_count());
++    }
++    if (baidu::xpu::api::gemm_int8(moe_ctx[id], false, true, 1, n, k, 1.0f,
++            (const float *) x, k, (const int8_t *) w_i8, 127.0f, k,
++            0.0f, (float *) y, n) != 0) return false;
++    if (scales && xdnn::broadcast_mul<float>(moe_ctx[id], (const float *) y, scales,
++                                             (float *) y, {1, n}, {1, n}) != 0) return false;
++    return true;
++}
++
+ void matmul(Kernel & kernel, int id, void * y, const void * w, const void * x,
+             int k, int n, int batch, WeightType type, const float * scales, const float * maximum, int tile) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+     require(type == WeightType::f32 || type == WeightType::f16 || type == WeightType::q4_0 || type == WeightType::rowwise_i8);
+-    require(k > 0 && k <= 16384 && k%32 == 0 && n > 0 && batch > 0 && n <= INT_MAX/batch && k <= INT_MAX/batch);
++    /* the vendor gemm_int8 path handles K wider than 16384 (verified 18944 @ 124 GB/s);
++       the self-written Q4/F16 kernels stay at the original limit. */
++    const int kmax_w8 = type == WeightType::rowwise_i8 ? 65536 : 16384;
++    require(k > 0 && k <= kmax_w8 && k%32 == 0 && n > 0 && batch > 0 && n <= INT_MAX/batch && k <= INT_MAX/batch);
+     require((size_t)n*batch <= INT_MAX/4 && (size_t)k*batch <= INT_MAX/4);
+     size_t row_bytes=type == WeightType::f32 ? (size_t)k*4 : type == WeightType::f16 ? (size_t)k*2 : type == WeightType::q4_0 ? (size_t)k/32*18 : (size_t)k;
+     require(y && w && x && (size_t)n <= INT_MAX/row_bytes && (tile == 1 || tile == 16));
+@@ -277,6 +439,176 @@ void matmul(Kernel & kernel, int id, void * y, const void * w, const void * x,
+     require(type != WeightType::rowwise_i8 || (scales && maximum));
+     launch_mv(*kernel.impl_,id,y,w,x,k,n,batch,(int)type,scales,maximum,tile);
+ }
++void elementwise_add3(Kernel & kernel, int id,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(rows0 >= 0 && rows1 >= 0 && rows2 >= 0);
++    require(rows0 == 0 || (y0 && a0 && b0 && width0 > 0));
++    require(rows1 == 0 || (y1 && a1 && b1 && width1 > 0));
++    require(rows2 == 0 || (y2 && a2 && b2 && width2 > 0));
++    require(bias0 == 0 || bias0 == 1);
++    require(bias1 == 0 || bias1 == 1);
++    require(bias2 == 0 || bias2 == 1);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    kernel.impl_->id = id;
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-elementwise-add3", id);
++    if (!y0) y0 = (void *) a0;
++    if (!y1) y1 = (void *) a1;
++    if (!y2) y2 = (void *) a2;
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &y0, (const void *) &a0, (const void *) &b0,
++                             (const void *) &y1, (const void *) &a1, (const void *) &b1,
++                             (const void *) &y2, (const void *) &a2, (const void *) &b2}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&rows0, &width0, &bias0, &rows1, &width1, &bias1, &rows2, &width2, &bias2}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    note_launch();
++    if (!async_ops()) check(xpu_wait());
++}
++
++/* add3v2：与 elementwise_add3 同签名，但把每段 (rows,width,bias) 打包成 1 个 int。
++ * 参数区 9*8 + 3*4 = 84 B；空段由调用方填成有效设备指针，rows=0 时 kernel 跳过。 */
++static int add3_pack_cfg(int rows, int width, int bias) {
++    return ((bias & 1) << 30) | ((width & 0x3ffff) << 12) | (rows & 0xfff);
++}
++void elementwise_add3v2(Kernel & kernel, int id,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1,
++                      void * y2, const void * a2, const void * b2, int rows2, int width2, int bias2) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(rows0 >= 0 && rows1 >= 0 && rows2 >= 0);
++    require(y0 && a0 && b0 && y1 && a1 && b1 && y2 && a2 && b2);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    kernel.impl_->id = id;
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-elementwise-add3v2", id);
++    int c0 = add3_pack_cfg(rows0, width0, bias0);
++    int c1 = add3_pack_cfg(rows1, width1, bias1);
++    int c2 = add3_pack_cfg(rows2, width2, bias2);
++    /* 原地别名快照：与 elementwise() 完全相同，只是每段各用一块独立 buffer。
++       默认流保序，KUNLUN_ALIAS_NOWAIT=1 时原版也不做全设备 wait，这里保持一致。 */
++    void * ya[3] = {y0, y1, y2};
++    const void * aa[3] = {a0, a1, a2};
++    const void * bb[3] = {b0, b1, b2};
++    const int rr[3] = {rows0, rows1, rows2};
++    const int ww[3] = {width0, width1, width2};
++    const int biasv[3] = {bias0, bias1, bias2};
++    static void * snap[2][3] = {{nullptr, nullptr, nullptr}, {nullptr, nullptr, nullptr}};
++    static size_t snap_cap[2][3] = {{0, 0, 0}, {0, 0, 0}};
++    for (int i = 0; i < 3; ++i) {
++        if (rr[i] <= 0 || (ya[i] != aa[i] && ya[i] != bb[i])) continue;
++        size_t elems = (size_t) rr[i] * ww[i];
++        if (ya[i] == bb[i] && biasv[i]) elems = (size_t) ww[i];
++        const size_t bytes = elems * 4;
++        void * & dst = snap[id & 1][i];
++        size_t & cap = snap_cap[id & 1][i];
++        if (cap < bytes) {
++            if (dst) release(id, dst, cap);
++            dst = allocate(id, bytes);
++            cap = bytes;
++        }
++        require(dst);
++        copy_rows(kernel, id, dst, ya[i], (int) elems, 1, (int) elems, 0);
++        if (bb[i] == ya[i]) bb[i] = dst;
++        if (aa[i] == ya[i]) aa[i] = dst;
++    }
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &ya[0], (const void *) &aa[0], (const void *) &bb[0],
++                             (const void *) &ya[1], (const void *) &aa[1], (const void *) &bb[1],
++                             (const void *) &ya[2], (const void *) &aa[2], (const void *) &bb[2]}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&c0, &c1, &c2}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    note_launch();
++    if (!async_ops()) check(xpu_wait());
++}
++
++void ew_col(Kernel & kernel, int id, void * y, const void * a, const void * b,
++            int rows, int width, int op) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(y && a && b && rows > 0 && width > 0 && width <= 16384);
++    require(op == 0 || op == 1);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-ew-col", id);
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &y, (const void *) &a, (const void *) &b}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&rows, &width, &op}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    if (!async_ops()) check(xpu_wait());
++}
++void unary(Kernel & kernel, int id, void * y, const void * a, int n, int op) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(y && a && n > 0 && n <= INT_MAX / 4 && op >= 1 && op <= 3);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-unary", id);
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &y, (const void *) &a}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    check(xpu_launch_argument_set(&n, 4, offset)); offset += 4;
++    check(xpu_launch_argument_set(&op, 4, offset));
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    if (!async_ops()) check(xpu_wait());
++}
++void gdn(Kernel & kernel, int id, void * out, void * state_out,
++         const void * q, const void * k, const void * v, const void * g,
++         const void * beta, const void * state_in,
++         int S_v, int H_v, int H_k, int n_seqs, int kda, float scale) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(out && state_out && q && k && v && g && beta && state_in);
++    require(S_v > 0 && S_v <= 256 && H_v > 0 && H_k > 0 && n_seqs > 0);
++    require(H_v % H_k == 0 && (kda == 0 || kda == 1) && std::isfinite(scale));
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    static Kernel::Impl * cache[2] = {nullptr, nullptr};
++    Kernel::Impl * & program = cache[id & 1];
++    if (!program) program = new Kernel::Impl{};
++    auto & fn = *program;
++    select(id); load_kernel(fn, "kunlun-gdn", id);
++    size_t offset = 0;
++    for (const void * arg : {(const void *) &out, (const void *) &state_out, (const void *) &q,
++                             (const void *) &k, (const void *) &v, (const void *) &g,
++                             (const void *) &beta, (const void *) &state_in}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&S_v, &H_v, &H_k, &n_seqs, &kda}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_argument_set(&scale, 4, offset));
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn));
++    if (!async_ops()) check(xpu_wait());
++}
+ void elementwise(Kernel & kernel, int id, void * y, const void * a, const void * b,
+                  int n, int width, int bn, ElementwiseOp operation, float parameter) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+@@ -298,7 +630,9 @@ void elementwise(Kernel & kernel, int id, void * y, const void * a, const void *
+     if (!program) program=new Kernel::Impl{};
+     auto & fn=*program;
+     select(id); load_kernel(fn,vector_broadcast ? "kunlun-elementwise-broadcast" : "kunlun-elementwise",id);
+-    if (y == a || y == b) {
++    static const bool alias_nocopy = [] {
++        const char * e = std::getenv("KUNLUN_ALIAS_NOCOPY"); return e && e[0] == '1'; }();
++    if ((y == a || y == b) && !alias_nocopy) {
+         size_t bytes=(size_t)(y == a ? n : bn)*4;
+         if (fn.alias_input_size < bytes) {
+             release(id,fn.alias_input,fn.alias_input_size);
+@@ -311,7 +645,12 @@ void elementwise(Kernel & kernel, int id, void * y, const void * a, const void *
+         } else {
+             copy_rows(kernel,id,fn.alias_input,y,bytes/4,1,bytes/4,0);
+         }
+-        check(xpu_wait());
++        /* KUNLUN_ALIAS_NOWAIT=1：alias 拷贝和随后的 elementwise 都在默认流上，顺序由流保证，
++           这次「全设备排空」是防御性的，去掉可省掉每 token ~120 次 pipeline 重灌。
++           数据完全相同（同一份快照），所以结果应逐字一致。默认关闭。 */
++        static const bool alias_nowait = [] {
++            const char * e = std::getenv("KUNLUN_ALIAS_NOWAIT"); return e && e[0] == '1'; }();
++        if (!alias_nowait) check(xpu_wait());
+         if (b == y) b=fn.alias_input;
+         if (a == y) a=fn.alias_input;
+     }
+@@ -319,8 +658,28 @@ void elementwise(Kernel & kernel, int id, void * y, const void * a, const void *
+     for (const void * arg : {(const void *)&y,(const void *)&a,(const void *)&b}) { check(xpu_launch_argument_set(arg,8,offset)); offset+=8; }
+     for (const int * arg : {&n,&width,&bn,&op}) { check(xpu_launch_argument_set(arg,4,offset)); offset+=4; }
+     check(xpu_launch_argument_set(&parameter,4,offset));
+-    check(xpu_launch_config(4,8)); check(xpu_launch_async(fn.fn)); check(xpu_wait());
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn)); if (!async_ops()) check(xpu_wait());
+ }
++void elementwise_bias(Kernel & kernel, int id, void * y, const void * a, const void * b,
++                      int n, int width, int bn, ElementwiseOp operation, float parameter, float bias) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    int op=(int)operation;
++    require(y && a && n > 0 && n <= INT_MAX/4 && width > 0 && width <= 16384 && n%width == 0);
++    require((bn == n || bn == width) && (b == nullptr || bn <= n));
++    require(std::isfinite(parameter) && std::isfinite(bias));
++    require(op == 4);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    kernel.impl_->id=id;
++    if (!kernel.impl_->elementwise) kernel.impl_->elementwise=new Kernel::Impl{};
++    auto & fn=*kernel.impl_->elementwise;
++    select(id); load_kernel(fn,"kunlun-elementwise-bias",id);
++    size_t offset=0;
++    for (const void * arg : {(const void *)&y,(const void *)&a,(const void *)&b}) { check(xpu_launch_argument_set(arg,8,offset)); offset+=8; }
++    for (const int * arg : {&n,&width,&bn,&op}) { check(xpu_launch_argument_set(arg,4,offset)); offset+=4; }
++    for (const float * arg : {&parameter,&bias}) { check(xpu_launch_argument_set(arg,4,offset)); offset+=4; }
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn)); if (!async_ops()) check(xpu_wait());
++}
++
+ const char * swiglu_reason(const SwiGLULayout &p) {
+     if(p.type!=InputType::f32 && p.type!=InputType::f16)return "type";
+     int bytes=p.type==InputType::f32?4:2;
+@@ -364,8 +723,33 @@ bool swiglu(Kernel &kernel,int id,void *y,size_t y_bytes,const void *gate,size_t
+     for(const int *arg:{&p.width,&p.rows,&p.gate_stride,&p.up_stride,&p.output_stride,&type,&tile}) {
+         check(xpu_launch_argument_set(arg,4,offset));offset+=4;
+     }
+-    check(xpu_launch_config(4,16));check(xpu_launch_async(fn.fn));check(xpu_wait());return true;
++    check(xpu_launch_config(launcher_clusters(),16));check(xpu_launch_async(fn.fn));if (!async_ops()) check(xpu_wait());return true;
+ }
++void elementwise_add2(Kernel & kernel, int id,
++                      void * y0, const void * a0, const void * b0, int rows0, int width0, int bias0,
++                      void * y1, const void * a1, const void * b1, int rows1, int width1, int bias1) {
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    require(y0 && a0 && b0 && y1 && a1 && b1);
++    require(rows0 > 0 && rows1 > 0 && width0 > 0 && width1 > 0);
++    require(width0 <= 16384 && width1 <= 16384);
++    require((rows0 * width0) <= INT_MAX / 4 && (rows1 * width1) <= INT_MAX / 4);
++    require(kernel.impl_->id == -1 || kernel.impl_->id == id);
++    kernel.impl_->id = id;
++    if (!kernel.impl_->elementwise2) kernel.impl_->elementwise2 = new Kernel::Impl{};
++    auto & fn = *kernel.impl_->elementwise2;
++    select(id); load_kernel(fn, "kunlun-elementwise-add2", id);
++    size_t offset = 0;
++    for (const void * arg : {(const void *)&y0, (const void *)&a0, (const void *)&b0,
++                             (const void *)&y1, (const void *)&a1, (const void *)&b1}) {
++        check(xpu_launch_argument_set(arg, 8, offset)); offset += 8;
++    }
++    for (const int * arg : {&rows0, &width0, &bias0, &rows1, &width1, &bias1}) {
++        check(xpu_launch_argument_set(arg, 4, offset)); offset += 4;
++    }
++    check(xpu_launch_config(launcher_clusters(), 8));
++    check(xpu_launch_async(fn.fn)); note_launch();
++}
++
+ void copy_rows(Kernel & kernel, int id, void * dst, const void * src,
+                int width, int rows, int stride, int column) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+@@ -386,13 +770,24 @@ void copy_rows(Kernel & kernel, int id, void * dst, const void * src,
+     for (const int * arg : {&width,&rows,&stride,&column}) {
+         check(xpu_launch_argument_set(arg,4,offset)); offset+=4;
+     }
+-    check(xpu_launch_config(4,8)); check(xpu_launch_async(fn.fn));
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn));
++}
++static uint64_t sr_t_cfg_ns=0,sr_t_lau_ns=0,sr_calls=0,sr_rows_last=0;
++static uint64_t sr_fake_calls=0;
++static bool sr_fake_merge(){static const bool v=!!std::getenv("KUNLUN_SETROWS_FAKE_MERGE");return v;}
++static void sr_profile_dump(){
++ static uint64_t p_calls=0,p_cfg=0,p_lau=0;
++ uint64_t d=sr_calls-p_calls;if(!d)return;
++ std::fprintf(stderr,"SETROWS_F16_PROFILE delta_calls=%llu per_call_us: cfg=%.1f launch=%.1f total=%.1f\n",
++  (unsigned long long)d,sr_t_cfg_ns/1000.0/d,sr_t_lau_ns/1000.0/d,(sr_t_cfg_ns+sr_t_lau_ns)/1000.0/d);
++ p_calls=sr_calls;p_cfg=sr_t_cfg_ns;p_lau=sr_t_lau_ns;
+ }
+ bool set_rows_f16(Kernel & kernel, int id, void * dst, size_t dst_bytes,
+                   const void * src, size_t src_bytes, const void * indices, size_t index_bytes,
+                   const SetRowsLayout & p) {
+     std::lock_guard<std::recursive_mutex> lock(mutex);
+     if(!kv_tracked_rows())kv_max_invalidate(id,dst,dst_bytes);
++    if(sr_fake_merge() && (++sr_fake_calls & 1)){ ++sr_calls; return true; }
+     require(dst && src && indices && dst != src && p.width > 0 && p.rows > 0 && p.dim2 > 0 && p.dim3 > 0);
+     require(p.destination_rows > 0 && (p.source_bytes == 2 || p.source_bytes == 4) && (p.index_bytes == 4 || p.index_bytes == 8));
+     require(p.index_extent[0] > 0 && p.index_extent[1] > 0 && p.dim2%p.index_extent[0] == 0 && p.dim3%p.index_extent[1] == 0);
+@@ -432,17 +827,53 @@ bool set_rows_f16(Kernel & kernel, int id, void * dst, size_t dst_bytes,
+     require(fn.scratch);
+     static_assert(sizeof(SetRowsLayout)==22*4,"SetRowsLayout layout");
+     int config[128]={}; std::memcpy(config,&p,sizeof(p));
+-    check(xpu_memcpy(fn.scratch,config,sizeof(config),XPU_HOST_TO_DEVICE)); check(xpu_wait());
++    static const int cache_level = [] {
++        const char * e = std::getenv("KUNLUN_SET_ROWS_CFG_CACHE");
++        return e ? std::atoi(e) : 0;
++    }();
++    static std::map<void*, std::vector<unsigned char>> cfg_cache;
++    static long cfg_hits = 0, cfg_misses = 0;
++    bool descriptor_cached = false;
++    if (cache_level > 0) {
++        const unsigned char * bytes = (const unsigned char *) config;
++        auto it = cfg_cache.find(fn.scratch);
++        if (it != cfg_cache.end() && it->second.size() == sizeof(config) &&
++            std::memcmp(it->second.data(), bytes, sizeof(config)) == 0) {
++            descriptor_cached = true; ++cfg_hits;
++        } else {
++            cfg_cache[fn.scratch].assign(bytes, bytes + sizeof(config)); ++cfg_misses;
++        }
++    }
++    static const bool sr_prof = !!std::getenv("KUNLUN_SETROWS_PROFILE");
++    auto SR_T0 = sr_prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++    if (!descriptor_cached) {
++        check(xpu_memcpy(fn.scratch,config,sizeof(config),XPU_HOST_TO_DEVICE));
++        check(xpu_wait());
++    } else if (cache_level < 2) {
++        check(xpu_wait());
++    }
++    if (sr_prof) sr_t_cfg_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-SR_T0).count();
++    auto SR_T1 = sr_prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++    if ((cfg_hits + cfg_misses) && (cfg_hits + cfg_misses) % 20000 == 0 &&
++        cache_level > 0 && std::getenv("KUNLUN_SET_ROWS_CFG_DEBUG"))
++        std::fprintf(stderr, "KUNLUN set_rows cfg cache hits=%ld misses=%ld\n", cfg_hits, cfg_misses);
+     void * descriptor=fn.scratch;
+     void * status=(char *)fn.scratch+256;
+     size_t offset=0;
+     for (const void * arg : {(const void *)&dst,(const void *)&src,(const void *)&indices,(const void *)&descriptor,(const void *)&status}) {
+         check(xpu_launch_argument_set(arg,8,offset)); offset+=8;
+     }
+-    check(xpu_launch_config(4,8)); check(xpu_launch_async(fn.fn)); check(xpu_wait());
+-    int invalid=0;
+-    check(xpu_memcpy(&invalid,status,4,XPU_DEVICE_TO_HOST)); check(xpu_wait());
+-    return invalid == 0;
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(fn.fn)); maybe_wait();
++    if(!(std::getenv("KUNLUN_SKIP_STATUS") && std::getenv("KUNLUN_SKIP_STATUS")[0]=='1')){
++        int invalid=0;
++        check(xpu_memcpy(&invalid,status,4,XPU_DEVICE_TO_HOST)); check(xpu_wait());
++        if(invalid)return false;
++    }
++    if (sr_prof) {
++        sr_t_lau_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-SR_T1).count();
++        if (++sr_calls % 4096 == 0) sr_profile_dump();
++    }
++    return true;
+ }
+ 
+ void rms_norm(Kernel & kernel, int id, void * y, const void * input, int width, int rows, float epsilon) {
+@@ -467,12 +898,12 @@ void rms_norm(Kernel & kernel, int id, void * y, const void * input, int width,
+     size_t offset=0;
+     for (const void * arg : {(const void *)&x,(const void *)&partials}) { check(xpu_launch_argument_set(arg,8,offset)); offset+=8; }
+     for (const int * arg : {&width,&rows}) { check(xpu_launch_argument_set(arg,4,offset)); offset+=4; }
+-    check(xpu_launch_config(4,8)); check(xpu_launch_async(first.fn)); check(xpu_wait());
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(first.fn));
+     offset=0;
+     for (const void * arg : {(const void *)&y,(const void *)&x,(const void *)&partials}) { check(xpu_launch_argument_set(arg,8,offset)); offset+=8; }
+     for (const int * arg : {&width,&rows}) { check(xpu_launch_argument_set(arg,4,offset)); offset+=4; }
+     check(xpu_launch_argument_set(&epsilon,4,offset));
+-    check(xpu_launch_config(4,8)); check(xpu_launch_async(second.fn)); check(xpu_wait());
++    check(xpu_launch_config(launcher_clusters(),8)); check(xpu_launch_async(second.fn)); if (!async_ops()) check(xpu_wait());
+ }
+ 
+ namespace {
+@@ -501,16 +932,27 @@ struct NativeL3 {
+ std::weak_ptr<NativeL3> native_l3[2];
+ struct NativeArgument { const void * value; size_t size; };
+ template<class T> NativeArgument native_arg(const T & value) { return {&value,sizeof(T)}; }
++// KUNLUN_Q4_GEMV_CORES: cores per cluster for the Q4 GEMV launch (default 8 => 32 of 64 cores).
++static int gemv_cores(int def) {
++    static int cached = -1;
++    if (cached < 0) {
++        const char * e = std::getenv("KUNLUN_Q4_GEMV_CORES");
++        int v = e ? std::atoi(e) : 0;
++        cached = (v >= 1 && v <= 16) ? v : def;
++        if (e) std::fprintf(stderr, "KUNLUN Q4 gemv cores per cluster: %d (%d total)\n", cached, cached * 4);
++    }
++    return cached;
++}
+ void native_launch(Kernel::Impl & program, std::initializer_list<NativeArgument> args, int cores) {
+     size_t offset=0;
+     for (auto arg : args) { check(xpu_launch_argument_set(arg.value,arg.size,offset)); offset+=arg.size; }
+-    check(xpu_launch_config(4,cores)); check(xpu_launch_async(program.fn));
++    check(xpu_launch_config(launcher_clusters(),cores)); check(xpu_launch_async(program.fn)); note_launch();
+ }
+ void native_launch_stream(Kernel::Impl & program, std::initializer_list<NativeArgument> args, int cores, XPUStream stream, const void *timeline=nullptr, int slot=0) {
+     size_t offset=0;
+     for (auto arg : args) { check(xpu_launch_argument_set(arg.value,arg.size,offset)); offset+=arg.size; }
+     if(timeline){check(xpu_launch_argument_set(&timeline,8,offset));offset+=8;check(xpu_launch_argument_set(&slot,4,offset));}
+-    check(xpu_launch_config(4,cores,stream)); check(xpu_launch_async(program.fn));
++    check(xpu_launch_config(launcher_clusters(),cores,stream)); check(xpu_launch_async(program.fn)); note_launch();
+ }
+ void native_reserve(std::unique_ptr<Buffer> & buffer, int id, size_t size) {
+     if (!buffer || buffer->size() < size) { check(xpu_wait()); buffer.reset(new Buffer(id,size)); }
+@@ -630,6 +1072,7 @@ bool large_pp_enabled() {
+ #include "kv-max.inc"
+ #include "flash.inc"
+ 
++
+ Statistics statistics() { return {{matmuls[0].load(),matmuls[1].load()},peer_copies.load(),peer_bytes.load()}; }
+ const char * version() { return "0.7.12"; }
+ } // namespace kunlun
+diff --git a/src/kv-max.inc b/src/kv-max.inc
+index 175d59d..3406772 100644
+--- a/src/kv-max.inc
++++ b/src/kv-max.inc
+@@ -1,3 +1,4 @@
++#include <chrono>
+ // Exact maxima of tracked physical F16 rows, not logical/active KV cells.
+ namespace {
+ struct KVMaxEngine {
+@@ -6,6 +7,18 @@ struct KVMaxEngine {
+  ~KVMaxEngine(){std::lock_guard<std::recursive_mutex>lock(mutex);select(id);check(xpu_wait());if(vendor)xdnn::destroy_context(vendor);for(auto *f:{&writer,&build,&reduce})if(f->code)check(xpu_free(f->code));}
+ };
+ std::weak_ptr<KVMaxEngine> kv_engines[2];KVMaxStatistics kv_stats[2];uint64_t kv_generation=0;
++uint64_t kv_t_cfg_ns=0,kv_t_launch_ns=0,kv_t_lwait_ns=0,kv_t_flag_ns=0;
++static bool kv_profile_on(){static const bool v=!!std::getenv("KUNLUN_SETROWS_PROFILE");return v;}
++static void kv_profile_dump(){
++ static uint64_t p_calls=0,p_cfg=0,p_lau=0,p_lw=0,p_flg=0;
++ uint64_t d_calls=kv_stats[0].writer_calls+kv_stats[1].writer_calls-p_calls;
++ if(!d_calls)return;
++ uint64_t d_cfg=kv_t_cfg_ns-p_cfg,d_lau=kv_t_launch_ns-p_lau,d_lw=kv_t_lwait_ns-p_lw,d_flg=kv_t_flag_ns-p_flg;
++ std::fprintf(stderr,"SETROWS_PROFILE delta_calls=%llu per_call_us: cfg=%.1f launch=%.1f lwait=%.1f flag=%.1f total=%.1f\n",
++  (unsigned long long)d_calls,d_cfg/1000.0/d_calls,d_lau/1000.0/d_calls,d_lw/1000.0/d_calls,d_flg/1000.0/d_calls,
++  (d_cfg+d_lau+d_lw+d_flg)/1000.0/d_calls);
++ p_calls+=d_calls;p_cfg+=d_cfg;p_lau+=d_lau;p_lw+=d_lw;p_flg+=d_flg;
++}
+ bool kv_rows_notice_suppressed=false;
+ int kv_mode(){const char *p=std::getenv("KUNLUN_FLASH_KV_MAX");return !p||!std::strcmp(p,"auto")?1:!std::strcmp(p,"verify")?2:0;}
+ int kv_min_s(int features){const char *p=std::getenv("KUNLUN_FLASH_KV_MAX_MIN_S");if(p){int n=std::atoi(p);if(n==256||n==512||n==1024||n==2048||n==4096||n==8192||n==16384)return n;}return features>=1024?512:features>=256?8192:INT_MAX;}
+@@ -90,11 +103,19 @@ bool kv_max_set_rows(Kernel &kernel,int id,void *dst,size_t db,const void *src,s
+  bool all_finite=r->all_finite;select(id);if(!update_max)r->ensure_engine();else r->ensure();if(r->pending>=0){r->add_dirty(r->pending,r->pending+1);r->pending=-1;}if(tg_max){if(!r->partials)kv_stats[id].metadata_bytes+=256;native_reserve(r->partials,id,256);}auto &e=*r->engine;load_kernel(e.writer,"kunlun-kv-max-writer",id);native_reserve(e.descriptor,id,512);
+  if(tg_max&&!r->zero[targets[0]])r->global_valid=false;
+  for(size_t i=0;i<count;++i)r->zero[targets[i]]=0;
+- int cfg[128]={};std::memcpy(cfg,&p,sizeof(p));cfg[23]=p.rows==1?(tg_max?0:-1):(pp_max?1:0);check(xpu_memcpy(e.descriptor->data(),cfg,sizeof(cfg),XPU_HOST_TO_DEVICE));check(xpu_wait());
++ int cfg[128]={};std::memcpy(cfg,&p,sizeof(p));cfg[23]=p.rows==1?(tg_max?0:-1):(pp_max?1:0);
++ if(kv_profile_on()){auto T0=std::chrono::steady_clock::now();check(xpu_memcpy(e.descriptor->data(),cfg,sizeof(cfg),XPU_HOST_TO_DEVICE));check(xpu_wait());kv_t_cfg_ns+=(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-T0).count();}
++ else{check(xpu_memcpy(e.descriptor->data(),cfg,sizeof(cfg),XPU_HOST_TO_DEVICE));check(xpu_wait());}
+  void *desc=e.descriptor->data(),*status=(char*)desc+256,*maximum=r->maxima?r->maxima->data():desc;
+- void *partial=r->partials?r->partials->data():desc;native_launch(e.writer,{native_arg(dst),native_arg(src),native_arg(indices),native_arg(desc),native_arg(status),native_arg(maximum),native_arg(partial)},8);check(xpu_wait());
+- int flags[2]={};check(xpu_memcpy(flags,status,8,XPU_DEVICE_TO_HOST));check(xpu_wait());require(flags[0]==0);if(flags[1])r->poison=true;
+- for(size_t i=0;i<count;++i){if(update_max)r->clean(targets[i],targets[i]+1);else r->add_dirty(targets[i],targets[i]+1);r->finite[targets[i]]=1;r->event("fused-row",targets[i],targets[i]+1);}if(all_finite&&!flags[1])r->all_finite=true;if(tg_max)r->pending=targets[0];else r->global_valid=false;++kv_stats[id].writer_calls;kv_stats[id].writer_rows+=count;return true;
++ void *partial=r->partials?r->partials->data():desc;if(kv_profile_on()){auto T1=std::chrono::steady_clock::now();native_launch(e.writer,{native_arg(dst),native_arg(src),native_arg(indices),native_arg(desc),native_arg(status),native_arg(maximum),native_arg(partial)},8);auto T2=std::chrono::steady_clock::now();check(xpu_wait());kv_t_launch_ns+=(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(T2-T1).count();kv_t_lwait_ns+=(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-T2).count();}
++ else{native_launch(e.writer,{native_arg(dst),native_arg(src),native_arg(indices),native_arg(desc),native_arg(status),native_arg(maximum),native_arg(partial)},8);check(xpu_wait());}
++ int flags[2]={};
++ if(kv_profile_on()){auto T3=std::chrono::steady_clock::now();check(xpu_memcpy(flags,status,8,XPU_DEVICE_TO_HOST));check(xpu_wait());kv_t_flag_ns+=(uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-T3).count();}
++ else{check(xpu_memcpy(flags,status,8,XPU_DEVICE_TO_HOST));check(xpu_wait());}
++ require(flags[0]==0);if(flags[1])r->poison=true;
++ for(size_t i=0;i<count;++i){if(update_max)r->clean(targets[i],targets[i]+1);else r->add_dirty(targets[i],targets[i]+1);r->finite[targets[i]]=1;r->event("fused-row",targets[i],targets[i]+1);}if(all_finite&&!flags[1])r->all_finite=true;if(tg_max)r->pending=targets[0];else r->global_valid=false;++kv_stats[id].writer_calls;kv_stats[id].writer_rows+=count;
++ if(kv_profile_on()){static uint64_t dump_at=0;if((kv_stats[0].writer_calls+kv_stats[1].writer_calls)>=dump_at+4096){dump_at=kv_stats[0].writer_calls+kv_stats[1].writer_calls;kv_profile_dump();}}
++ return true;
+ }
+ namespace {
+ bool kv_view(KVMaxCache::Impl *r,const void *data,const Tensor4Layout &p,int &start){
+diff --git a/src/q4-activation.inc b/src/q4-activation.inc
+index 71192ef..2b00bd7 100644
+--- a/src/q4-activation.inc
++++ b/src/q4-activation.inc
+@@ -56,7 +56,7 @@ bool common_q4_prepare(CommonQ4Workspace & work, int id, const void * input, int
+     l.id=id;l.k=k;l.m=m;l.type=type;l.input=input;l.input_bytes=(size_t)m*k*bytes;
+     size_t index=0;
+     for (int first=0;first<m;++index) {
+-        int rows=std::min(128,m-first),padded=m==1?1:rows<=8?8:rows<=32?32:rows<=64?64:128;
++        int rows=std::min(128,m-first),padded=m==1?1:rows<=8?(m8_exact_enabled()?rows:8):rows<=32?32:rows<=64?64:128;
+         const void * x=(const char *)input+(size_t)first*k*bytes;
+         if (k!=kp || rows!=padded || (uintptr_t)x%64) {
+             native_reserve(s.input,id,(size_t)padded*kp*bytes);
+diff --git a/src/q4-common.inc b/src/q4-common.inc
+index a8c70f8..4c9a42a 100644
+--- a/src/q4-common.inc
++++ b/src/q4-common.inc
+@@ -1,6 +1,8 @@
+ // Private implementation shares the existing Program, allocation and L3 runtime.
+ #include "q4-common-pack.h"
+ 
++static bool m8_exact_enabled() { static const bool v=[](){const char*s=std::getenv("KUNLUN_Q4_M8_EXACT");return s && !std::strcmp(s,"1");}(); return v; }
++static bool m1_gemm_enabled() { static const bool v=[](){const char*s=std::getenv("KUNLUN_Q4_M1_GEMM");return s && !std::strcmp(s,"1");}(); return v; }
+ bool common_q4_supported(int k, int n) { return k > 0 && k <= 16384 && n > 0 && n <= 32000; }
+ size_t common_q4_size(int k, int n) {
+     if (!common_q4_supported(k,n)) return 0;
+@@ -112,14 +114,33 @@ CommonQ4MacStatistics CommonQ4Workspace::mac_statistics() const {
+     return impl_->mac_stats;
+ }
+ namespace {
++bool ext13_enabled() {
++    static const bool v = []{ const char * m=std::getenv("KUNLUN_Q4_STREAM_13B"); return m && !std::strcmp(m,"1"); }();
++    return v;
++}
+ bool common_stream_shape(const CommonQ4Info & a) {
+     if(a.k!=a.kp)return false;
+     static const int shapes[][2]={
+         {2048,256},{2048,1024},{2048,2048},{2048,2816},{2048,5632},
+         {4096,256},{4096,2048},{4096,4096},{4096,5632},{4096,11008},
+-        {5632,1024},{5632,2048},{11008,2048},{11008,4096}
++        {5632,1024},{5632,2048},{11008,2048},{11008,4096},
++        {5120,5120},{5120,13824},{13824,5120},
++        /* qwen2.5-7B: 3584 hidden, 18944 ffn. k=18944 (ffn_down) deliberately
++           omitted: gemv-stream rejects k>16384 and would silently return. */
++        {3584,256},{3584,512},{3584,1792},{3584,3584},{3584,9472},{3584,18944}
+     };
+     for(const auto & shape:shapes)if(a.kp==shape[0] && a.np==shape[1])return true;
++    // KUNLUN_Q4_STREAM_13B=1: 允许 13B 形状(K=5120/13824)走 MAC/DMA stream 路径
++    {
++        const char * ext=std::getenv("KUNLUN_Q4_STREAM_13B");
++        if(ext && !std::strcmp(ext,"1")) {
++            if(a.k==5120 && (a.n==5120 || a.n==13824))return true;
++            if(a.k==13824 && a.n==5120)return true;
++            // row 切分：n 减半后的形状（2560 / 6912）
++            if(a.k==5120 && (a.n==2560 || a.n==6912))return true;
++            if(a.k==13824 && a.n==2560)return true;
++        }
++    }
+     return false;
+ }
+ bool common_stream_enabled(CommonQ4Workspace::Impl & s,const CommonQ4Info & a) {
+@@ -146,6 +167,7 @@ bool common_addr32_enabled(const CommonQ4Info & a) {
+ bool common_fast_sum_enabled(const CommonQ4Info & a) {
+     const char * mode=std::getenv("KUNLUN_Q4_GEMV_SUM_FAST");
+     if((mode && std::strcmp(mode,"1")) || a.k!=a.kp || a.n!=a.np)return false;
++    if(ext13_enabled() && ((a.k==5120 && (a.n==5120 || a.n==13824)) || (a.k==13824 && a.n==5120)))return true;
+     return (a.k==4096 && (a.n==4096 || a.n==11008)) || (a.k==11008 && a.n==4096) ||
+            (a.k==2048 && (a.n==256 || a.n==2048 || a.n==5632)) || (a.k==5632 && a.n==2048);
+ }
+@@ -166,7 +188,7 @@ Kernel::Impl & common_program(CommonQ4Workspace::Impl & s, int index, const char
+ void common_rows(CommonQ4Workspace::Impl & s, void * dst, const void * src, int width, int rows, int src_stride, int dst_stride, int dst_rows, int bytes) {
+     auto & p=common_program(s,15,"kunlun-common-io");
+     native_launch(p,{native_arg(dst),native_arg(src),native_arg(width),native_arg(rows),native_arg(src_stride),native_arg(dst_stride),native_arg(dst_rows),native_arg(bytes)},16);
+-    check(xpu_wait());
++    maybe_wait();
+ }
+ void common_quant_gemv(CommonQ4Workspace::Impl & s, const void * x, int k, int dtype, void * q, void * params) {
+     uint64_t begin=common_tick(s.activation->profile);
+@@ -183,7 +205,7 @@ void common_quant_gemv(CommonQ4Workspace::Impl & s, const void * x, int k, int d
+     native_launch(common_program(s,exact?34:0,exact?"kunlun-common-max-exact":"kunlun-common-max"),{native_arg(p0),native_arg(x),native_arg(k),native_arg(dtype)},16);
+     native_launch(common_program(s,pack?37:(exact?35:1),pack?"kunlun-common-main-pack":(exact?"kunlun-common-main-exact":"kunlun-common-main")),{native_arg(q),native_arg(r),native_arg(p1),native_arg(x),native_arg(p0),native_arg(k),native_arg(dtype)},16);
+     native_launch(common_program(s,pack?38:(exact?36:2),pack?"kunlun-common-residual-pack":(exact?"kunlun-common-residual-exact":"kunlun-common-residual")),{native_arg(q),native_arg(params),native_arg(r),native_arg(p0),native_arg(p1),native_arg(k)},16);
+-    check(xpu_wait());
++    maybe_wait();
+     ++s.activation->stats.quantized_chunks; s.activation->stats.quant_kernel_launches+=3;
+     if (s.activation->profile) s.activation->stats.quantization_ns+=common_tick(true)-begin;
+ }
+@@ -196,7 +218,7 @@ void common_quant_gemm(CommonQ4Workspace::Impl & s, const void * x, int m, int k
+         native_launch(common_program(s,5,"kunlun-common-quant-partial"),{native_arg(peaks),native_arg(x),native_arg(m),native_arg(k),native_arg(dtype)},16);
+         native_launch(common_program(s,6,"kunlun-common-quant-row-fused"),{native_arg(q),native_arg(scale),native_arg(x),native_arg(peaks),native_arg(m),native_arg(k),native_arg(dtype),native_arg(mode)},16);
+     }
+-    check(xpu_wait());
++    maybe_wait();
+     ++s.activation->stats.quantized_chunks; s.activation->stats.quant_kernel_launches+=m>=64 ? 1 : 2;
+     if (s.activation->profile) s.activation->stats.quantization_ns+=common_tick(true)-begin;
+ }
+@@ -211,7 +233,7 @@ bool common_gemv(CommonQ4Workspace::Impl & s, void * y, const CommonQ4Info & a,
+         auto & p=common_program(s,16,"kunlun-common-fallback");
+         std::fprintf(stderr,"Kunlun common Q4 PD%d exact CL fallback: L3 capacity/allocation K=%d N=%d\n",s.id,k,n);
+         native_launch(p,{native_arg(y),native_arg(w),native_arg(scales),native_arg(x),native_arg(k),native_arg(n),native_arg(batch),native_arg(dtype)},8);
+-        check(xpu_wait()); ++s.stats.paths[7]; return true;
++        maybe_wait(); ++s.stats.paths[7]; return true;
+     }
+     if (!prepared) { native_reserve(s.activation->quant,s.id,(size_t)4*k+1024); native_reserve(s.activation->scale,s.id,64); }
+     void * q=prepared ? const_cast<void *>(prepared->values) : s.activation->quant->data();
+@@ -226,12 +248,12 @@ bool common_gemv(CommonQ4Workspace::Impl & s, void * y, const CommonQ4Info & a,
+     if(addr32 && !s.programs[gemv_program].fn)std::fprintf(stderr,"Kunlun Q4 DMA address32 PD%d: %s K=%d N=%d ABI=1 fence/order unchanged\n",s.id,gemv_name,a.k,a.n);
+     if(nmajor && !s.programs[gemv_program].fn)std::fprintf(stderr,"Kunlun Q4 N-major PD%d: shape-selected, ABI=1, unchanged partial order\n",s.id);
+     if(stream && !nmajor && !s.programs[gemv_program].fn)std::fprintf(stderr,"Kunlun Q4 MAC/DMA stream PD%d: ABI=1 K=%d N=%d resident_L1D<=524288; original MAC order\n",s.id,a.k,a.n);
+-    native_launch(common_program(s,gemv_program,gemv_name,true),{native_arg(partial),native_arg(w),native_arg(q),native_arg(k),native_arg(n),native_arg(batch),native_arg(first),native_arg(n),native_arg(components),native_arg(bits),native_arg(zero),native_arg(zero),native_arg(one),native_arg(pipelined),native_arg(scales),native_arg(fold),native_arg(params)},8);
+-    check(xpu_wait());
++    native_launch(common_program(s,gemv_program,gemv_name,true),{native_arg(partial),native_arg(w),native_arg(q),native_arg(k),native_arg(n),native_arg(batch),native_arg(first),native_arg(n),native_arg(components),native_arg(bits),native_arg(zero),native_arg(zero),native_arg(one),native_arg(pipelined),native_arg(scales),native_arg(fold),native_arg(params)},gemv_cores(8));
++    maybe_wait();
+     const bool fast_sum=stream && common_fast_sum_enabled(a);
+     if(fast_sum && !s.programs[23].fn)std::fprintf(stderr,"Kunlun Q4 GEMV fast sum PD%d: K=%d N=%d, CL16, ordered K32 FP32 sum\n",s.id,a.k,a.n);
+     native_launch(common_program(s,fast_sum?23:4,fast_sum?"kunlun-common-sum-fast":"kunlun-common-sum"),{native_arg(y),native_arg(partial),native_arg(scales),native_arg(k),native_arg(n),native_arg(batch),native_arg(first),native_arg(n),native_arg(mode)},16);
+-    check(xpu_wait());s.last_components=2; ++s.stats.paths[0];
++    maybe_wait();s.last_components=2; ++s.stats.paths[0];
+     if(stream){++s.mac_stats.stream_sd_calls;s.mac_stats.resident_l1d_bytes=std::max(s.mac_stats.resident_l1d_bytes,(size_t)std::min(k/32,128)*4096);}
+     else ++s.mac_stats.baseline_sd_calls;
+     return true;
+@@ -256,7 +278,7 @@ void common_gemm(CommonQ4Workspace::Impl & s, void * y, const CommonQ4Info & a,
+     const int k=a.kp,n=a.np;
+     int path,nt,kt,parts=1;
+     const char * name;
+-    if (m == 8) { path=1;name="kunlun-common-combined";nt=n%512?256:512;kt=n%512?128:64; }
++    if (m == 8 || (m8_exact_enabled() && m >= 1 && m <= 8)) { path=1;name="kunlun-common-combined";nt=n%512?256:512;kt=n%512?128:64; }
+     else if (m == 32) { path=2;name="kunlun-common-wide";nt=64;kt=256; }
+     else if (m == 64) { path=k>8192?5:3;name=k>8192?"kunlun-common-combo2":"kunlun-common-rows64";nt=64;kt=128;parts=k>8192?2:1; }
+     else { require(m == 128);path=k>4096?6:4;name=k>4096?"kunlun-common-combo4":"kunlun-common-rows128";nt=32;kt=128;parts=k>4096?4:1; }
+@@ -281,11 +303,11 @@ void common_gemm(CommonQ4Workspace::Impl & s, void * y, const CommonQ4Info & a,
+         if(!s.programs[program].fn)std::fprintf(stderr,"Kunlun Q4 GEMM owners PD%d: %s, M128, original FP32 order\n",s.id,name);
+     }
+     native_launch(common_program(s,program,name,true),{native_arg(target),native_arg(q),native_arg(w),native_arg(scales),native_arg(scale),native_arg(m),native_arg(n),native_arg(k),native_arg(nt),native_arg(kt),native_arg(ticks)},8);
+-    check(xpu_wait());
++    maybe_wait();
+     if (parts>1) {
+         // The seventh stats argument is mandatory in the non-profile join too.
+         native_launch(common_program(s,14,"kunlun-common-join-slices"),{native_arg(y),native_arg(target),native_arg(scale),native_arg(m),native_arg(n),native_arg(parts),native_arg(ticks)},16);
+-        check(xpu_wait());
++        maybe_wait();
+     }
+     ++s.stats.paths[path];
+ }
+@@ -297,7 +319,8 @@ bool common_execute(CommonQ4Workspace::Impl & s, int id, void * y, const CommonQ
+     int bytes=type==InputType::f16?2:4,dtype=bytes==2;
+     size_t chunk_index=0;
+     for (int first=0;first<m;) {
+-        int rows=std::min(128,m-first),padded=m==1?1:rows<=8?8:rows<=32?32:rows<=64?64:128;
++        const bool m1g=m1_gemm_enabled();
++        int rows=std::min(128,m-first),padded=(m==1&&!m1g)?1:rows<=8?(m8_exact_enabled()?rows:8):rows<=32?32:rows<=64?64:128;
+         const void * x=(const char *)input+(size_t)first*a.k*bytes;
+         void * out=(float *)y+(size_t)first*a.n;
+         if (!prepared && (a.k!=a.kp || rows!=padded || (uintptr_t)x%64)) {
+@@ -307,13 +330,13 @@ bool common_execute(CommonQ4Workspace::Impl & s, int id, void * y, const CommonQ
+         bool crop=a.n!=a.np || rows!=padded || (uintptr_t)out%64;
+         if (crop) { native_reserve(s.output,id,(size_t)padded*a.np*4); out=s.output->data(); }
+         const auto * chunk=prepared ? &prepared->chunks[chunk_index++] : nullptr;
+-        if (m == 1) { if (!common_gemv(s,out,a,w.storage,x,dtype,chunk)) return false; }
++        if (m == 1 && !m1g) { if (!common_gemv(s,out,a,w.storage,x,dtype,chunk)) return false; }
+         else common_gemm(s,out,a,w.storage,x,padded,dtype,chunk,m==128 && rows==128 && a.k==a.kp && a.n==a.np);
+         if (crop) common_rows(s,(float *)y+(size_t)first*a.n,out,a.n,rows,a.np,a.n,rows,4);
+         s.last_rows=rows;s.last_kp=a.kp;if(m!=1)s.last_components=1;
+         first+=rows;++s.stats.chunks;
+     }
+-    check(xpu_wait());++s.stats.calls;++matmuls[id];return true;
++    maybe_wait();++s.stats.calls;++matmuls[id];return true;
+ }
+ }
+ void common_q4_matmul(CommonQ4Workspace & workspace, int id, void * y, const CommonQ4Weight & weight, const void * input, int m, InputType type) {
+diff --git a/src/q4-pair.inc b/src/q4-pair.inc
+index 13ec903..bad44b4 100644
+--- a/src/q4-pair.inc
++++ b/src/q4-pair.inc
+@@ -64,12 +64,12 @@ bool common_q4_matmul_pair(CommonQ4Workspace & work,int id,void * y0,void * y1,
+     native_launch(common_program(s,program,name,true),
+         {native_arg(p0),native_arg(w),native_arg(q),native_arg(k),native_arg(n),native_arg(batch),native_arg(first),native_arg(n),
+          native_arg(components),native_arg(bits),native_arg(zero),native_arg(zero),native_arg(one),native_arg(pipelined),native_arg(scale0),native_arg(fold),native_arg(params),native_arg(u),native_arg(scale1),native_arg(p1)},8);
+-    check(xpu_wait());
++    maybe_wait();
+     const char *sum_mode=std::getenv("KUNLUN_Q4_PAIR_SUM_FAST");
+     const bool sum_fast=(!sum_mode || !std::strcmp(sum_mode,"1"));
+     native_launch(common_program(s,sum_fast?33:26,sum_fast?"kunlun-common-sum-pair-fast":"kunlun-common-sum-pair"),
+         {native_arg(y0),native_arg(p0),native_arg(scale0),native_arg(k),native_arg(n),native_arg(batch),native_arg(first),native_arg(n),native_arg(mode),native_arg(y1),native_arg(p1)},16);
+-    check(xpu_wait());
++    maybe_wait();
+     s.last_values=q;s.last_scales=params;s.last_components=2;s.last_rows=1;s.last_kp=k;
+     s.stats.paths[0]+=2;s.stats.calls+=2;s.stats.chunks+=2;matmuls[id]+=2;++s.mac_stats.stream_sd_calls;
+     s.mac_stats.resident_l1d_bytes=std::max(s.mac_stats.resident_l1d_bytes,(size_t)(k/32)*4096);

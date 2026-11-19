@@ -1,0 +1,329 @@
+diff --git a/ggml/src/ggml-kunlun/ggml-kunlun.cpp b/ggml/src/ggml-kunlun/ggml-kunlun.cpp
+index 4115726d6..394f477c4 100644
+--- a/ggml/src/ggml-kunlun/ggml-kunlun.cpp
++++ b/ggml/src/ggml-kunlun/ggml-kunlun.cpp
+@@ -75,8 +75,9 @@ struct type_context { int id; bool split; double fraction; std::string name; };
+ struct tensor_parts {
+     void * ptr[2] = {};
+     size_t bytes[2] = {}, physical[2] = {};
+-    int rows[2] = {}, k = 0;
+-    bool packed = false, native = false, common = false, q6 = false;
++    int rows[2] = {}, k = 0, n1 = 0;
++    bool packed = false, native = false, common = false, q6 = false, moe = false;
++    bool replicated = false;   /* split buft, but the whole tensor is mirrored on both dies */
+     std::unique_ptr<kunlun::Q6KWeight> q6_weight[2];
+     std::unique_ptr<kunlun::CommonQ4Weight> common_weight[2];
+     std::vector<char> original;
+@@ -151,27 +158,151 @@ buffer_context * buffer_of(const ggml_tensor * t) {
+ }
+ bool q6_enabled(){const char*s=std::getenv("KUNLUN_Q6_K_SDNN");return !s||!std::strcmp(s,"1");}
+ bool use_q6(const ggml_tensor*t){return q6_enabled()&&t->type==GGML_TYPE_Q6_K&&!t->view_src&&ggml_is_matrix(t)&&ggml_is_contiguous(t)&&(t->ne[0]==2048||t->ne[0]==4096)&&t->ne[1]==32000;}
++// 按层强制 int8：GGML_KUNLUN_I8_FORCE_BLK=N -> blk 号 < N 的层走 int8，其余保持 Q4。
++// 用于在 16GB 卡上腾显存给投机 draft（Q4 层慢但省 45% 空间）。
++static int i8_force_blk() {
++    static int v = -2;
++    if (v == -2) {
++        const char * e = std::getenv("GGML_KUNLUN_I8_FORCE_BLK");
++        v = e ? std::atoi(e) : -1;
++    }
++    return v;
++}
++static bool i8_forced(const ggml_tensor * t) {
++    const int n = i8_force_blk();
++    if (n < 0 || t->name == nullptr) return false;
++    const char * f = std::strstr(t->name, "blk.");
++    if (f == nullptr) return false;
++    const int idx = std::atoi(f + 4);
++    return idx >= 0 && idx < n;
++}
++
++
++/* Diagnostic only: qwen2.5-7B ffn_down has K=18944, above common-q4's 16384
++   limit, so it silently falls back to the CDNN slow path.  With
++   KUNLUN_I8_FORCE_DOWN=1 we route just that tensor (K>16384, name contains
++   ffn_down) through the vendor W8/int8 path instead. */
++static bool i8_force_down(const ggml_tensor * t) {
++    static int v = -2;
++    if (v == -2) {
++        const char * e = std::getenv("KUNLUN_I8_FORCE_DOWN");
++        v = (e && std::strcmp(e, "1") == 0) ? 1 : 0;
++    }
++    if (!v || t->type != GGML_TYPE_Q4_0 || t->name == nullptr) return false;
++    if (t->ne[0] <= 16384 || !std::strstr(t->name, "ffn_down")) return false;
++    static int logged = 0;
++    if (logged++ < 4)
++        std::fprintf(stderr, "[FFNDOWN] force W8: %s K=%lld N=%lld\n",
++                     t->name, (long long)t->ne[0], (long long)t->ne[1]);
++    return true;
++}
++// KUNLUN_I8_FORCE_NMIN=n: 让 N>=n 的张量优先走 W8/SDNN 而不是 common-Q4(int4)。
++// 必须在这里拦，因为 get_alloc_size 的判定顺序是 use_common → use_i8。
++static bool i8_force_nmin(const ggml_tensor * t) {
++    static int v = -2;
++    if (v == -2) { const char * e = std::getenv("KUNLUN_I8_FORCE_NMIN"); v = e ? std::atoi(e) : 0; }
++    if (v <= 0 || t->type != GGML_TYPE_Q4_0) return false;
++    return t->ne[1] >= v;
++}
++// KUNLUN_I8_FORCE_NMAX=n: 让 N<=n 的小矩阵走 W8/SDNN，N 大的留在 common-Q4(int4)。
++// 小矩阵在 int4 上的 DS/sync 固定开销占比高，转 int8 收益最大；大矩阵能摊薄，留 int4 省显存。
++static bool i8_force_nmax(const ggml_tensor * t) {
++    static int v = -2;
++    if (v == -2) { const char * e = std::getenv("KUNLUN_I8_FORCE_NMAX"); v = e ? std::atoi(e) : 0; }
++    if (v <= 0 || t->type != GGML_TYPE_Q4_0) return false;
++    return t->ne[1] <= v;
++}
+ bool use_common(const ggml_tensor * t) {
++    if (i8_forced(t)) return false;
++    if (i8_force_down(t)) return false;
++    if (i8_force_nmin(t)) return false;
++    if (i8_force_nmax(t)) return false;
+     return common_enabled() && t->type==GGML_TYPE_Q4_0 && ggml_is_matrix(t) && ggml_is_contiguous(t) && !t->view_src &&
+         t->ne[0]%32==0 && t->ne[0]<=INT_MAX && t->ne[1]<=INT_MAX && kunlun::common_q4_supported(t->ne[0],t->ne[1]);
+ }
+ bool use_native(const ggml_tensor * t) {
++    if (i8_force_down(t)) return false;
+     const char * setting=std::getenv("GGML_KUNLUN_NATIVE_Q4");
+     return !use_common(t) && setting && std::strcmp(setting,"1") == 0 && t->type == GGML_TYPE_Q4_0 &&
+         ggml_is_matrix(t) && ggml_is_contiguous(t) && !t->view_src &&
+         t->ne[0] <= INT_MAX && t->ne[1] <= INT_MAX &&
+         kunlun::native_q4_layout_supported(t->ne[0],t->ne[1]);
+ }
++static bool moe_native_on() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("KUNLUN_MOE_NATIVE_Q4"); v = (e && std::strcmp(e,"1")==0) ? 1 : 0; }
++    return v == 1;
++}
++bool use_native_expert(const ggml_tensor * t) {
++    if (!moe_native_on()) return false;
++    if (t->type != GGML_TYPE_Q4_0 || t->view_src || !ggml_is_contiguous(t)) return false;
++    if (t->ne[3] != 1 || t->ne[2] <= 1) return false;
++    if (t->ne[0] <= 0 || t->ne[0] > 16384 || t->ne[0] % 32 != 0) return false;
++    if (t->ne[1] <= 0 || t->ne[1] > 16384) return false;
++    return kunlun::native_q4_layout_supported((int)t->ne[0],(int)t->ne[1]);
++}
++size_t native_expert_size(int k, int n, int e) {
++    size_t per = kunlun::native_q4_size(k,n);
++    return per ? per*(size_t)e : 0;
++}
++bool use_i8_expert(const ggml_tensor * t) {
++    if (use_native_expert(t)) return false;
++    const char * s = std::getenv("KUNLUN_MOE_I8");
++    if (s && std::strcmp(s, "0") == 0) return false;
++    if (t->type != GGML_TYPE_Q4_0 || t->view_src || !ggml_is_contiguous(t)) return false;
++    if (t->ne[3] != 1 || t->ne[2] <= 1) return false;
++    if (t->ne[0] <= 0 || t->ne[0] > 16384 || t->ne[0] % 32 != 0) return false;
++    const int64_t rows = t->ne[1] * t->ne[2];
++    return rows > 0 && t->ne[1] > 0 && t->ne[0] * rows < INT_MAX;
++}
++/* the vendor gemm_int8 path is not limited to K<=16384 (verified up to 18944, 124 GB/s) */
++static const int KMAX_I8 = 65536;
++/* KUNLUN_SELF_SPLIT=1: the backend mirrors half the int8 rows onto the other die,
++   so the device llama.cpp allocates for only needs room for its own half. */
++static bool self_split_on() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("KUNLUN_SELF_SPLIT");
++                 v = (e && std::strcmp(e, "0") != 0) ? 1 : 0; }
++    return v == 1;
++}
++static int i8_force_kmin() {
++    static int v = -1;
++    if (v < 0) { const char * e = std::getenv("KUNLUN_I8_FORCE_KMIN"); v = e ? std::atoi(e) : 0; }
++    return v;
++}
++// FAKE 探针：跳过一半 ADD 的派发（结果会错，只量「砍掉 N 次 launch」的 perf 上界）。
++// 等价于「把 3 个 bias add 合成 1 个」这类子图合并的收益上限。
++static bool fake_skip_add() {
++    static const int on = [] { const char * e = std::getenv("KUNLUN_FAKE_SKIP_ADD"); return e && e[0]=='1' ? 1 : 0; }();
++    static int n = 0;
++    if (!on) return false;
++    return (n++ & 1) == 0;
++}
+ bool use_i8(const ggml_tensor * t) {
++    if (use_i8_expert(t)) return true;
+     const char * setting = std::getenv("GGML_KUNLUN_REQUANT_I8");
+-    return !use_common(t) && !use_native(t) && setting && std::strcmp(setting,"0") != 0 && t->type == GGML_TYPE_Q4_0 && ggml_is_matrix(t) && !t->view_src &&
+-        t->ne[0] > 0 && t->ne[0] <= 16384 && t->ne[0]%32 == 0 && t->ne[1] > 0 && t->ne[1] <= INT_MAX/t->ne[0];
++    /* KUNLUN_I8_FORCE_KMIN=k: force tensors with K>=k to W8 even when
++       common-Q4 (int4) would take them. Lets one process run a W8 target
++       (K=3584) with an int4 draft (K=896). Default 0 = off. */
++    const int kmin = i8_force_kmin();
++    static const int nmin = [] { const char * e = std::getenv("KUNLUN_I8_FORCE_NMIN"); return e ? std::atoi(e) : 0; }();
++    const bool force_k = (kmin > 0 && t->ne[0] >= kmin) || (nmin > 0 && t->ne[1] >= nmin);
++    const bool base = (force_k || (!use_common(t) && !use_native(t))) && setting && std::strcmp(setting,"0") != 0 && t->type == GGML_TYPE_Q4_0 && ggml_is_matrix(t) && !t->view_src &&
++        t->ne[0] > 0 && t->ne[0] <= KMAX_I8 && t->ne[0]%32 == 0 && t->ne[1] > 0 && t->ne[1] <= INT_MAX/t->ne[0];
++    if (base) return true;
++    // 强制层：形状本来能被 common-q4 接走，这里改判为 int8
++    if (!i8_forced(t)) return false;
++    return setting && std::strcmp(setting,"0") != 0 && t->type == GGML_TYPE_Q4_0 && ggml_is_matrix(t) && !t->view_src &&
++        t->ne[0] > 0 && t->ne[0] <= KMAX_I8 && t->ne[0]%32 == 0 && t->ne[1] > 0 && t->ne[1] <= INT_MAX/t->ne[0];
+ }
+ size_t packed_size(int k, int n) { return kunlun::packed_i8_size(k,n); }
+ float * scales(tensor_parts * p, int id) { return kunlun::packed_i8_scales(p->ptr[id],p->k,p->rows[id]); }
+ float * maxima(tensor_parts * p, int id) { return kunlun::packed_i8_maxima(p->ptr[id],p->k,p->rows[id]); }
+ 
++static double g_repack_ms = 0;
++static size_t g_repack_calls = 0, g_repack_rows = 0;
+ void repack(tensor_parts * p, size_t first, size_t last) {
++    const auto rp_t0 = std::chrono::steady_clock::now();
+     size_t row_bytes=ggml_row_size(p->q6?GGML_TYPE_Q6_K:GGML_TYPE_Q4_0,p->k), start=0;
+     for (int id=0;id<2;++id) {
+         size_t lo=std::max(first,start), hi=std::min(last,start+p->rows[id]);
+@@ -689,24 +1572,77 @@ bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
+         return b && ggml_is_contiguous(b) && ggml_is_matrix(a) && ggml_is_matrix(b) && ggml_is_matrix(t) &&
+             a->ne[0]==b->ne[0] && t->ne[0]==a->ne[1] && t->ne[1]==b->ne[1] &&
+             (a->type == GGML_TYPE_Q4_0 || a->type == GGML_TYPE_F16 || a->type == GGML_TYPE_F32 || (use_q6(a)&&b->ne[1]<=512)) &&
+-            a->ne[0] > 0 && a->ne[0] % 32 == 0 && a->ne[0] <= 16384 && a->ne[1] > 0 && a->ne[1] <= INT_MAX && b->ne[1] > 0 &&
++            a->ne[0] > 0 && a->ne[0] % 32 == 0 &&
++            (a->ne[0] <= 16384 || (a->type == GGML_TYPE_Q4_0 && a->ne[0] <= KMAX_I8 && use_i8(a))) &&
++            a->ne[1] > 0 && a->ne[1] <= INT_MAX && b->ne[1] > 0 &&
+             b->ne[1] <= INT_MAX / std::max<int64_t>(a->ne[1], 1) && b->type == GGML_TYPE_F32 && t->type == GGML_TYPE_F32 && !a->view_src &&
+             ggml_nbytes(a) <= INT_MAX && ggml_nbytes(b) <= INT_MAX && ggml_nbytes(t) <= INT_MAX;
+     }
+-    if (a->type != GGML_TYPE_F32 || t->type != GGML_TYPE_F32 || t->ne[0] <= 0 || t->ne[0] > 16384 || ggml_nelements(t) <= 0 || ggml_nelements(t) > INT_MAX / 4) return false;
++    bool scalar_scale = false;
++    if (t->op == GGML_OP_SCALE) {
++        float sc = 0, bi = 0;
++        std::memcpy(&sc, t->op_params, 4);
++        std::memcpy(&bi, (const char *) t->op_params + 4, 4);
++        scalar_scale = std::isfinite(sc) && std::isfinite(bi);
++    }
++    if (a->type != GGML_TYPE_F32 || t->type != GGML_TYPE_F32 || t->ne[0] <= 0 || (t->ne[0] > 16384 && !scalar_scale) || ggml_nelements(t) <= 0 || ggml_nelements(t) > INT_MAX / 4) return false;
+     if (t->op == GGML_OP_RMS_NORM) {
+         float epsilon; std::memcpy(&epsilon,t->op_params,4);
+         return t->ne[0] > 0 && t->ne[0] <= 16384 && std::isfinite(epsilon) && epsilon > 0;
+     }
+-    if (t->op == GGML_OP_UNARY) return ggml_get_unary_op(t) == GGML_UNARY_OP_SILU;
+-    if (t->op == GGML_OP_SCALE) { float bias; std::memcpy(&bias, (const char *)t->op_params+4, 4); return bias == 0; }
++    if (t->op == GGML_OP_UNARY) {
++        const enum ggml_unary_op u = ggml_get_unary_op(t);
++        return u == GGML_UNARY_OP_SILU || u == GGML_UNARY_OP_SIGMOID || u == GGML_UNARY_OP_SOFTPLUS;
++    }
++    if (t->op == GGML_OP_SCALE) {
++        if (std::getenv("GGML_KUNLUN_DIAGNOSTICS")) {
++            ggml_backend_buffer_t sb = a->buffer ? a->buffer : (a->view_src ? a->view_src->buffer : nullptr);
++            std::fprintf(stderr,"[SCALE] name=%s ne=[%d,%d,%d,%d] type=%s srcbuf=%s split=%d aview=%d\n",
++                t->name, (int)t->ne[0],(int)t->ne[1],(int)t->ne[2],(int)t->ne[3],
++                ggml_type_name(t->type), sb?ggml_backend_buffer_name(sb):"null",
++                -1, a->view_src?1:0);
++        }
++        float scale, bias;
++        std::memcpy(&scale, t->op_params, 4);
++        std::memcpy(&bias, (const char *)t->op_params+4, 4);
++        if (!std::isfinite(scale) || !std::isfinite(bias)) return false;
++        if (bias == 0) return true;              /* plain scale: existing elementwise path */
++        /* scale+bias goes through kunlun-elementwise-bias; same shape limits. */
++        return t->ne[0] > 0 && t->ne[0] <= 16384 && ggml_nelements(t) <= INT_MAX/4;
++    }
+     if (t->op == GGML_OP_ADD || t->op == GGML_OP_MUL) {
+-        return b && b->type == GGML_TYPE_F32 && ggml_is_contiguous(b) &&
+-            (ggml_are_same_shape(a, b) || (ggml_nelements(b) == a->ne[0] && ggml_is_vector(b)));
++        if (!b || b->type != GGML_TYPE_F32 || !ggml_is_contiguous(b)) return false;
++        if (ggml_are_same_shape(a, b)) return true;
++        if (ggml_nelements(b) == a->ne[0] && ggml_is_vector(b)) return true;
++        /* 逐列广播：b = [1, rows, ...]，沿 ne0 广播 */
++        return b->ne[0] == 1 && b->ne[1] == a->ne[1] && b->ne[2] == a->ne[2] &&
++               b->ne[3] == a->ne[3] && a->ne[1] > 0;
+     }
+     return false;
+ }
+ 
++// 诊断：把判给 CPU 的算子按 (op, ne, type) 聚合打印一次。
++bool supports_op(ggml_backend_dev_t d, const ggml_tensor * t) {
++    const bool ok = supports_op_impl(d, t);
++    if (!ok) {
++        static const bool enabled = [] { const char * e = std::getenv("KUNLUN_SUP_DIAG"); return e && e[0] == '1'; }();
++        if (enabled) {
++            static std::mutex mtx;
++            static std::map<std::string, int> seen;
++            char key[256];
++            std::snprintf(key, sizeof(key), "%s ne=[%d,%d,%d,%d] type=%s c=%d/%d",
++                ggml_op_name(t->op),
++                (int) t->ne[0], (int) t->ne[1], (int) t->ne[2], (int) t->ne[3],
++                ggml_type_name(t->type),
++                (int) ggml_is_contiguous(t), (int) (t->src[0] ? ggml_is_contiguous(t->src[0]) : -1));
++            std::lock_guard<std::mutex> lock(mtx);
++            int n = ++seen[key];
++            if (n <= 2) std::fprintf(stderr, "KUNLUN SUPDIAG cpu: %s name=%s hit=%d\n", key, t->name, n);
++        }
++    }
++    return ok;
++}
++
+ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
+     auto * ctx = new backend_context{}; ctx->id = ((device_context *)dev->context)->id;
+     ctx->activation.enabled=activation_share_enabled();
+@@ -866,10 +1954,17 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
+         type_iface.get_max_size = [](ggml_backend_buffer_type_t) -> size_t { return 1ULL << 30; };
+         type_iface.get_alloc_size = [](ggml_backend_buffer_type_t b, const ggml_tensor * t) {
+             if (((type_context *)b->context)->split) return ggml_nbytes(t);
++            if (use_native_expert(t)) return native_expert_size((int)t->ne[0],(int)t->ne[1],(int)t->ne[2]);
++            if (use_i8_expert(t)) return packed_size((int)t->ne[0],(int)(t->ne[1]*t->ne[2]));
+             if (use_q6(t)) return kunlun::q6_k_size(t->ne[0],t->ne[1]);
+             if (use_common(t)) return kunlun::common_q4_size(t->ne[0],t->ne[1]);
+             if (use_native(t)) return kunlun::native_q4_size(t->ne[0],t->ne[1]);
+-            return use_i8(t) ? packed_size(t->ne[0],t->ne[1]) : ggml_nbytes(t);
++            if (use_i8(t)) {
++                int64_t n = t->ne[1] * ((t->ne[3] == 1 && t->ne[2] > 1) ? t->ne[2] : 1);
++                if (self_split_on() && n >= 2) return packed_size((int)t->ne[0], (int)(n - n/2));
++                return packed_size((int)t->ne[0], (int)n);
++            }
++            return ggml_nbytes(t);
+         };
+         buffer_iface.get_base = [](ggml_backend_buffer_t b) { return ((buffer_context *)b->context)->base; };
+         buffer_iface.init_tensor = [](ggml_backend_buffer_t b, ggml_tensor * t) {
+@@ -885,19 +1980,48 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
+                     t->name,(long long)t->ne[0],(long long)t->ne[1],use_i8(t)?"CDNN":"existing Q4");
+             if (common_enabled() && t->type==GGML_TYPE_Q4_0 && !use_common(t))
+                 std::fprintf(stderr,"KUNLUN common storage fallback: tensor=%s K=%lld N=%lld reason=type/shape/stride/view method=%s\n",t->name,(long long)t->ne[0],(long long)t->ne[1],use_native(t)?"legacy native":use_i8(t)?"CDNN":"original Q4");
+-            if (!c->type->split && !use_i8(t) && !use_native(t) && !use_common(t) && !use_q6(t)) return GGML_STATUS_SUCCESS;
++            if (c->type->split && (use_i8_expert(t) || use_native_expert(t))) return GGML_STATUS_SUCCESS;
++            if (!c->type->split && !use_i8(t) && !use_native(t) && !use_common(t) && !use_q6(t) && !use_native_expert(t)) return GGML_STATUS_SUCCESS;
+             std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
+             auto p = std::unique_ptr<tensor_parts>(new tensor_parts{});
+-            GGML_ASSERT(ggml_is_matrix(t));
+-            p->packed=use_i8(t); p->native=use_native(t);p->common=use_common(t);p->q6=use_q6(t); p->k=t->ne[0];
++            const bool expert_i8 = use_i8_expert(t);
++            const bool expert_native = use_native_expert(t);
++            GGML_ASSERT(ggml_is_matrix(t) || expert_i8 || expert_native);
++            p->packed=use_i8(t); p->native=use_native(t)||expert_native;p->common=use_common(t);p->q6=use_q6(t); p->k=t->ne[0]; p->moe=expert_i8||expert_native; p->n1=(int)t->ne[1];
++            if (t->ne[0] > 16384) {
++                static std::atomic<int> packwide{0};
++                if (packwide.fetch_add(1) < 6)
++                    std::fprintf(stderr, "[PACKWIDE] name=%s type=%d ne=%lld,%lld packed=%d native=%d common=%d q6=%d\n",
++                                 t->name, (int) t->type, (long long) t->ne[0], (long long) t->ne[1],
++                                 (int) p->packed, (int) p->native, (int) p->common, (int) p->q6);
++            }
+             if (p->packed || p->native || p->common || p->q6) p->original.resize(ggml_nbytes(t));
+-            if (c->type->split) { p->rows[0] = t->ne[1] * c->type->fraction; if(p->q6)p->rows[0]=p->rows[0]/32*32; p->rows[1] = t->ne[1] - p->rows[0]; }
+-            else p->rows[c->type->id]=t->ne[1];
++            /* KUNLUN_SELF_SPLIT=1: keep llama.cpp on one device (its graph stays whole) while this
++               backend mirrors half of the int8 rows onto the other die and runs both halves in
++               parallel inside matmul(). */
++            const bool self_split = !c->type->split && p->packed && self_split_on();
++            const bool replicate_vec = c->type->split && vec_replicate_on() && ggml_is_vector(t);
++            if (replicate_vec) {
++                /* a 1-row tensor has nothing to split: rows[1]=0 would strand it on one die and push
++                   every consumer (bias add, norm mul) onto the CPU backend */
++                p->rows[0] = (int) t->ne[1];
++                p->rows[1] = (int) t->ne[1];
++                p->replicated = true;
++                static bool once = false;
++                if (!once) { once = true; std::fprintf(stderr, "KUNLUN split: replicating vectors on both dies (e.g. %s ne=%lld,%lld)\n", t->name, (long long)t->ne[0], (long long)t->ne[1]); }
++            }
++            else if (c->type->split) { p->rows[0] = t->ne[1] * c->type->fraction; if(p->q6)p->rows[0]=p->rows[0]/32*32; p->rows[1] = t->ne[1] - p->rows[0]; }
++            else if (self_split) {
++                const int total = expert_i8 ? (int)(t->ne[1]*t->ne[2]) : (int)t->ne[1];
++                if (total >= 2) { p->rows[1] = total / 2; p->rows[0] = total - p->rows[1]; }
++                else p->rows[c->type->id] = total;
++            }
++            else p->rows[c->type->id] = (expert_i8 || expert_native) ? (int)(t->ne[1]*t->ne[2]) : (int)t->ne[1];
+             for (int d=0;d<2;++d) {
+                 p->bytes[d] = (size_t)p->rows[d]*ggml_row_size(t->type,t->ne[0]);
+-                p->physical[d] = p->q6 ? kunlun::q6_k_size(p->k,p->rows[d]) : p->common ? kunlun::common_q4_size(p->k,p->rows[d]) : p->native ? kunlun::native_q4_size(p->k,p->rows[d]) : p->packed ? packed_size(p->k,p->rows[d]) : p->bytes[d];
++                p->physical[d] = p->q6 ? kunlun::q6_k_size(p->k,p->rows[d]) : p->common ? kunlun::common_q4_size(p->k,p->rows[d]) : (p->native && p->moe && p->n1 > 0) ? native_expert_size(p->k,p->n1,p->rows[d]/p->n1) : p->native ? kunlun::native_q4_size(p->k,p->rows[d]) : p->packed ? packed_size(p->k,p->rows[d]) : p->bytes[d];
+                 if (p->bytes[d]) {
+-                    p->ptr[d] = c->type->split ? allocate(d,p->physical[d]) : t->data;
++                    p->ptr[d] = (c->type->split || (self_split && d != c->type->id)) ? allocate(d,p->physical[d]) : t->data;
+                     if (!p->ptr[d]) { for(int j=0;j<d;++j) { p->q6_weight[j].reset();p->common_weight[j].reset();release(j,p->ptr[j],p->physical[j]); } return GGML_STATUS_ALLOC_FAILED; }
+                     if(p->q6)p->q6_weight[d].reset(new kunlun::Q6KWeight(d,p->k,p->rows[d],p->ptr[d],p->physical[d]));
+                     if (p->common) {
