@@ -2580,7 +2580,7 @@ ggml_tensor * llm_graph_context::build_moe_cache_slots(
 }
 
 // input embeddings with optional lora
-ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float tok_scale) const {
+ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float tok_scale, bool kunlun_tensor) const {
     const int64_t n_embd_inp = hparams.n_embd_inp();
     const int64_t n_embd     = hparams.n_embd;
 
@@ -2595,7 +2595,7 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
         tok_embd->type==GGML_TYPE_Q4_0 && n_embd_inp==n_embd && !hdmd && (!loras || loras->empty()) &&
         cparams.ctx_type==LLAMA_CONTEXT_TYPE_DEFAULT && !cparams.training && !cparams.embeddings && !cparams.pipeline_parallel;
     inp->kunlun_prune_mode=kunlun_eligible ? int(kunlun_prune_mixed_requested()) : -1;
-    const bool token_only=inp->kunlun_prune_mode==1 && ubatch.token && !ubatch.embd && !ubatch.is_mixed() && !ubatch.embd_state;
+    const bool token_only=(kunlun_tensor || inp->kunlun_prune_mode==1) && ubatch.token && !ubatch.embd && !ubatch.is_mixed() && !ubatch.embd_state;
     inp->kunlun_token_only=token_only;
     if (std::getenv("GGML_KUNLUN_DIAGNOSTICS") && inp->kunlun_prune_mode==1)
         LLAMA_LOG_INFO("KUNLUN input graph: token_only=%d mixed=%d external_embd=%d tokens=%u\n",int(token_only),int(ubatch.is_mixed()),int(ubatch.embd!=nullptr),ubatch.n_tokens);

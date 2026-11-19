@@ -612,7 +612,8 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
 
         // output
         if (std::regex_match(tensor_name, pattern_output_weight)) {
-            if (is_dsv4) {
+            // Kunlun's Q6_K kernel expects the full vocabulary.
+            if (is_dsv4 || ud->kunlun) {
                 return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
             }
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1);
@@ -1576,6 +1577,45 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
 }
 
 bool llama_model_base::load_tensors(llama_model_loader & ml) {
+    if (get_split_state_ud.kunlun) {
+        const auto * embedding = ml.get_tensor_meta("token_embd.weight");
+        const auto * output = ml.get_tensor_meta("output.weight");
+        if (arch != LLM_ARCH_LLAMA || hparams.n_layer() != 32 || hparams.n_embd != 4096 ||
+            hparams.n_head() != 32 || hparams.n_head_kv() != 32 ||
+            !embedding || embedding->type != GGML_TYPE_Q4_0 ||
+            !output || output->type != GGML_TYPE_Q6_K || output->ne[1] != 32000 ||
+            n_gpu_layers() < 33) {
+            throw std::runtime_error("Kunlun Tensor Split requires the fully offloaded Llama 2 7B Q4_0 model with Q6_K output");
+        }
+        const auto * split = tensor_split();
+        if (split && split[0] != split[1]) {
+            throw std::runtime_error("Kunlun Tensor Split requires an even two-PD split");
+        }
+        struct weight_shape {
+            const char * name;
+            int64_t k;
+            int64_t n;
+        };
+        const weight_shape weights[] = {
+            {"attn_q", 4096, 4096}, {"attn_k", 4096, 4096}, {"attn_v", 4096, 4096},
+            {"attn_output", 4096, 4096}, {"ffn_gate", 4096, 11008},
+            {"ffn_up", 4096, 11008}, {"ffn_down", 11008, 4096},
+        };
+        for (int layer = 0; layer < 32; ++layer) {
+            if (hparams.n_head(layer) != 32 || hparams.n_head_kv(layer) != 32 ||
+                hparams.n_embd_head_k(layer) != 128 || hparams.n_embd_head_v(layer) != 128) {
+                throw std::runtime_error("Kunlun Tensor Split requires 32 Q/KV heads of dimension 128");
+            }
+            for (const auto & weight : weights) {
+                const auto name = "blk." + std::to_string(layer) + "." + weight.name + ".weight";
+                const auto * tensor = ml.get_tensor_meta(name.c_str());
+                if (!tensor || tensor->type != GGML_TYPE_Q4_0 || !ggml_is_matrix(tensor) ||
+                    tensor->ne[0] != weight.k || tensor->ne[1] != weight.n) {
+                    throw std::runtime_error("Unsupported Kunlun Tensor Split Q4_0 weight: " + name);
+                }
+            }
+        }
+    }
     const auto & split_mode   = params.split_mode;
     const bool use_mlock      = params.load_mode == LLAMA_LOAD_MODE_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
     const auto & tensor_split = params.tensor_split;
@@ -1686,7 +1726,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         auto candidate=get_layer_buft_list(0);
         // A tied row-split output cannot share one full input weight allocation.
         bool tied_row_split=split_mode==LLAMA_SPLIT_MODE_ROW && !ml.get_tensor_meta("output.weight");
-        if(candidate.dev!=cpu_dev && !std::strncmp(ggml_backend_dev_name(candidate.dev),"KUNLUN",6) && !tied_row_split) {
+        if(candidate.dev!=cpu_dev && (get_split_state_ud.kunlun ||
+           !std::strncmp(ggml_backend_dev_name(candidate.dev),"KUNLUN",6)) && !tied_row_split) {
             pimpl->dev_input=candidate;
             LLAMA_LOG_INFO("%s: Q4 embedding prefers %s; unsupported input tensors keep CPU fallback\n",__func__,ggml_backend_dev_name(candidate.dev));
         }
@@ -1888,7 +1929,11 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             output->type == GGML_TYPE_NVFP4 &&
             (output_s || output_in_s)));
     // populate tensors_by_name
-    for (auto & [_, ctx_ptr] : ml.ctx_map) {
+    for (auto & [key, ctx_ptr] : ml.ctx_map) {
+        if (get_split_state_ud.kunlun && ggml_backend_buft_get_device(key.buft) != devices.front().dev) {
+            throw std::runtime_error("Kunlun Tensor Split weight placement failed: " +
+                    std::string(ggml_backend_buft_name(key.buft)));
+        }
         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
             tensors_by_name.emplace_back(ggml_get_name(cur), cur);
         }

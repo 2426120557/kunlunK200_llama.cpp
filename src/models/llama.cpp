@@ -105,7 +105,7 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
-    inpL = build_inp_embd(model.tok_embd);
+    inpL = build_inp_embd(model.tok_embd, 1.0f, model.get_split_state_ud.kunlun);
 
     // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
@@ -121,7 +121,8 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
 
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f/sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    const bool kv_only = model.get_split_state_ud.kunlun && n_outputs == 0;
+    ggml_tensor * inp_out_ids = kv_only ? nullptr : build_inp_out_ids();
 
     for (int il = 0; il < n_layer; ++il) {
         res->t_layer_inp[il] = inpL;
@@ -170,6 +171,10 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
             cb(cur, "attn_out", il);
+        }
+        if (il == n_layer - 1 && kv_only) {
+            // build_attn has already added the final layer's KV writes.
+            return;
         }
         if (il == n_layer - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);

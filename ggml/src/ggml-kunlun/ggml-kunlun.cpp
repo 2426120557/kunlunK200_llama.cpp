@@ -1,5 +1,6 @@
 #include "../k200-diag.h"
 #include "ggml-kunlun.h"
+#include "tp-profile.h"
 #include "ggml-backend-impl.h"
 #include "ggml-impl.h"
 #include <kunlun/k200.h>
@@ -21,6 +22,13 @@
 #include <sys/mman.h>
 
 namespace {
+
+// Keep explicit overrides, including 0, and apply the production default when unset.
+static const char * kunlun_default_on(const char * name) {
+    const char * setting = std::getenv(name);
+    return setting ? setting : "1";
+}
+
 std::recursive_mutex & runtime_mutex = kunlun::runtime_mutex();
 std::atomic<size_t> split_matmuls;
 std::atomic<size_t> common_paths[2][8], common_uploads[2], common_upload_bytes[2], common_regions[2], common_region_bytes[2];
@@ -107,12 +115,17 @@ struct ActivationShare {
     size_t prepares[2]={},hits[2]={},fallback[2]={},peer_saved_bytes=0,peer_saved_calls=0;
 };
 struct backend_context {
+    ggml_kunlun_tp_profile tp_profile{};
     ActivationShare activation;
     size_t pair_calls=0,pair_candidates=0,pair_fallbacks=0;
     bool pair_diagnostics=std::getenv("GGML_KUNLUN_Q4_GATE_UP_PAIR_STATS") && !std::strcmp(std::getenv("GGML_KUNLUN_Q4_GATE_UP_PAIR_STATS"),"1");
     unsigned pair_modes_seen=0;
     size_t pair_skips[6]={},pair_reasons[9]={};
-    uint64_t pair_generation=0;
+    uint64_t pair_generation=0,row_generation=0;
+    size_t row_parallel=0,row_declined=0,row_pair_calls=0,row_glu_calls=0;
+    kunlun::Kernel row_glu[2];
+    size_t row_chunk_waves=0;
+    void * row_pair_output[2]={};size_t row_pair_size[2]={};
     int id;
     kernel mv[2], ew, gather, kv, glu, attention, embedding, row_select;
     size_t row_select_calls=0,row_select_bytes=0;
@@ -272,6 +285,29 @@ ggml_backend_buffer_t alloc_buffer(ggml_backend_buffer_type_t bt, size_t size) {
 }
 
 #include "q4-activation-share.inc"
+bool row_pipeline_enabled() {
+    const char * mode=kunlun_default_on("GGML_KUNLUN_ROW_PIPELINE");return mode && !std::strcmp(mode,"1");
+}
+bool row_prepare(backend_context * c,int id,const void * input,int k,int m,uint64_t generation,kunlun::CommonQ4ActivationLease & lease) {
+    if(row_pipeline_enabled() && kunlun::common_q4_prepare_submit(c->common[id],id,input,k,m,generation,lease))return true;
+    return kunlun::common_q4_prepare(c->common[id],id,input,k,m,kunlun::InputType::f32,generation,lease);
+}
+bool row_chunks_enabled() {
+    const char * mode=kunlun_default_on("GGML_KUNLUN_ROW_CHUNKS");return mode && !std::strcmp(mode,"1");
+}
+bool row_overlap_enabled() {
+    const char * mode=kunlun_default_on("GGML_KUNLUN_ROW_OVERLAP");return mode && !std::strcmp(mode,"1");
+}
+void row_complete(backend_context * c,bool leave_main=false) {
+    if(row_pipeline_enabled())for(int id:{c->id,1-c->id})kunlun::common_q4_finish_submit(c->common[id]);
+    const char * copy_mode=std::getenv("GGML_KUNLUN_ROW_COPY");
+    if(leave_main && row_pipeline_enabled() && row_overlap_enabled() && (!copy_mode || std::strcmp(copy_mode,"legacy"))) {
+        kunlun::common_q4_crop_submit(c->common[c->id]);
+        kunlun::common_q4_complete(c->common[1-c->id]);
+    } else for(int id:{c->id,1-c->id})kunlun::common_q4_complete(c->common[id]);
+}
+const char * glu_reason(const ggml_tensor *);
+bool row_gate_pair(backend_context *,ggml_tensor *,ggml_tensor *,ggml_tensor *);
 #include "q4-gate-up-pair.inc"
 
 void launch_mv(backend_context * ctx, int id, void * y, const void * w, const void * x, int k, int n, int batch, int type, tensor_parts * packed = nullptr) {
@@ -332,6 +368,7 @@ void matmul(backend_context * ctx, ggml_tensor * dst) {
     ActivationMatmulScope activation_scope(ctx,dst);
     const auto * w=dst->src[0]; const auto * x=dst->src[1];
     int k=w->ne[0], n=w->ne[1], batch=x->ne[1];
+    K200_DIAG_SCOPE(matmul_diag,"op.matmul",ggml_type_name(w->type),w->name,0,ctx->id);
     auto * wb=buffer_of(w); auto * parts=(tensor_parts *)w->extra;
     const int main=ctx->id, other=1-main;
     if (!wb || !wb->type->split) {
@@ -360,23 +397,96 @@ void matmul(backend_context * ctx, ggml_tensor * dst) {
     // Keep raw staging valid as well: prepared dispatch may safely decline and
     // fall back, and an intervening F32/F16 row matmul can overwrite/resize it.
     bool staged=act.peer_generation==act.generation && act.peer_pointer==ctx->split_x && act.peer_extent==xs;
-    if (parts->common && staged && activation_ready(ctx,other,k,batch)) {
+    if (parts->common && staged && (activation_ready(ctx,other,k,batch) || (row_chunks_enabled() && act.use && (batch==256 || batch==512)))) {
         ++act.peer_saved_calls;act.peer_saved_bytes+=xs;
     } else peer(other,ctx->split_x,main,x->data,xs);
     act.peer_generation=act.use && parts->common ? act.generation : 0;
     act.peer_pointer=ctx->split_x;act.peer_extent=xs;
-    if (local_rows) launch_mv(ctx,main,local_output,parts->ptr[main],x->data,k,local_rows,batch,kernel_type(w->type),parts);
-    launch_mv(ctx,other,ctx->split_y,parts->ptr[other],ctx->split_x,k,remote_rows,batch,kernel_type(w->type),parts);
-    select(other); check(kunlun::wait()); select(main); check(kunlun::wait());
+    const char * parallel_mode=kunlun_default_on("GGML_KUNLUN_ROW_PARALLEL");
+    bool submitted[2]={};
+    bool chunks=parallel_mode && !std::strcmp(parallel_mode,"1") && row_chunks_enabled() && parts->common && local_rows &&
+        (batch==256 || batch==512) && k%256==0;
+    if(chunks) {
+        auto before0=ctx->common[0].statistics(),before1=ctx->common[1].statistics();
+        for(int first=0;first<batch;first+=128) {
+            kunlun::CommonQ4ActivationLease lease[2];bool prepared=true,done[2]={};
+            uint64_t generation=++ctx->row_generation;
+            for(int id:{main,other}) {
+                const void * input=(const float *)(id==main?x->data:ctx->split_x)+(size_t)first*k;
+                prepared=row_prepare(ctx,id,input,k,128,generation,lease[id]) && prepared;
+            }
+            for(int id:{main,other})kunlun::common_q4_prepare_complete(ctx->common[id]);
+            if(prepared)for(int id:{main,other}) {
+                void * output=(float *)(id==main?local_output:ctx->split_y)+(size_t)first*parts->rows[id];
+                done[id]=kunlun::common_q4_submit_shared(ctx->common[id],id,output,*parts->common_weight[id],lease[id],generation);
+            }
+            // Drain both PDs before the next wave reuses any scratch or shared L3.
+            row_complete(ctx);
+            for(int id:{main,other})if(!done[id]) {
+                const void * input=(const float *)(id==main?x->data:ctx->split_x)+(size_t)first*k;
+                void * output=(float *)(id==main?local_output:ctx->split_y)+(size_t)first*parts->rows[id];
+                kunlun::common_q4_matmul(ctx->common[id],id,output,*parts->common_weight[id],input,128);
+            }
+            ++ctx->row_chunk_waves;
+        }
+        for(int id:{main,other}) {
+            auto before=id?before1:before0,after=ctx->common[id].statistics();const char * phase=std::getenv("K200_PROFILE_PHASE");
+            auto & counts=common_phase[id][phase?phase:"other"];
+            for(int i=0;i<8;++i){size_t count=after.paths[i]-before.paths[i];common_paths[id][i]+=count;counts[i]+=count;}
+            common_m[id][128]+=batch/128;
+        }
+        submitted[main]=submitted[other]=true;
+    } else if(parallel_mode && !std::strcmp(parallel_mode,"1") && parts->common && local_rows &&
+       (batch==1 || batch==8 || batch==32 || batch==64 || batch==128)) {
+        kunlun::CommonQ4ActivationLease temporary[2];
+        auto generation=act.use ? act.generation : ++ctx->row_generation;
+        bool prepared=true;
+        for(int id:{main,other}) {
+            auto & lease=act.use ? act.lease[id] : temporary[id];
+            const void * input=id==main ? x->data : ctx->split_x;
+            if(!lease.matches(id,k,batch,kunlun::InputType::f32,generation))
+                prepared=row_prepare(ctx,id,input,k,batch,generation,lease) && prepared;
+        }
+        for(int id:{main,other})kunlun::common_q4_prepare_complete(ctx->common[id]);
+        if(prepared)for(int id:{main,other}) {
+            auto & lease=act.use ? act.lease[id] : temporary[id];
+            auto before=ctx->common[id].statistics();
+#ifdef K200_DIAGNOSTIC_HOOKS
+            auto mac_before=ctx->common[id].mac_statistics();
+#endif
+            submitted[id]=kunlun::common_q4_submit_shared(ctx->common[id],id,id==main?local_output:ctx->split_y,*parts->common_weight[id],lease,generation);
+            if(submitted[id]) {
+                auto after=ctx->common[id].statistics();const char * phase=std::getenv("K200_PROFILE_PHASE");
+                auto & counts=common_phase[id][phase?phase:"other"];
+                for(int i=0;i<8;++i){size_t count=after.paths[i]-before.paths[i];common_paths[id][i]+=count;counts[i]+=count;}
+                ++common_m[id][batch];
+#ifdef K200_DIAGNOSTIC_HOOKS
+                auto mac_after=ctx->common[id].mac_statistics();auto & mac=common_mac_phase[id][phase?phase:"other"];
+                mac[0]+=mac_after.baseline_sd_calls-mac_before.baseline_sd_calls;
+                mac[1]+=mac_after.stream_sd_calls-mac_before.stream_sd_calls;
+                mac[2]+=mac_after.shape_fallbacks-mac_before.shape_fallbacks;
+#endif
+            }
+        }
+        row_complete(ctx,true);
+        if(submitted[main] && submitted[other])++ctx->row_parallel;else ++ctx->row_declined;
+    }
+    if (local_rows && !submitted[main]) launch_mv(ctx,main,local_output,parts->ptr[main],x->data,k,local_rows,batch,kernel_type(w->type),parts);
+    if (!submitted[other]) launch_mv(ctx,other,ctx->split_y,parts->ptr[other],ctx->split_x,k,remote_rows,batch,kernel_type(w->type),parts);
+    const char * transfer_mode=kunlun_default_on("GGML_KUNLUN_ROW_TRANSFER");
+    const bool completed=parts->common;
+    const bool fast_transfer=completed && transfer_mode && !std::strcmp(transfer_mode,"1");
+    if(!fast_transfer) { select(other); check(kunlun::wait()); select(main); check(kunlun::wait()); }
+    auto copy_peer=fast_transfer ? kunlun::peer_completed : kunlun::peer;
     const char * copy_mode=std::getenv("GGML_KUNLUN_ROW_COPY");
     bool legacy=copy_mode && std::strcmp(copy_mode,"legacy") == 0;
     if (batch > 1 && !legacy) {
         if (local_rows) kunlun::copy_rows(ctx->gather,main,dst->data,local_output,local_rows,batch,n,local_offset);
-        if (!local_rows) peer(main,dst->data,other,ctx->split_y,ys);
+        if (!local_rows) copy_peer(main,dst->data,other,ctx->split_y,ys);
         else {
             if (ctx->peer_y_size < ys) { release(main,ctx->peer_y,ctx->peer_y_size); ctx->peer_y=allocate(main,ys); ctx->peer_y_size=ys; }
             GGML_ASSERT(ctx->peer_y);
-            peer(main,ctx->peer_y,other,ctx->split_y,ys);
+            copy_peer(main,ctx->peer_y,other,ctx->split_y,ys);
             kunlun::copy_rows(ctx->gather,main,dst->data,ctx->peer_y,remote_rows,batch,n,remote_offset);
             check(kunlun::wait());
         }
@@ -386,10 +496,65 @@ void matmul(backend_context * ctx, ggml_tensor * dst) {
                 (char *)local_output+(size_t)b*local_rows*4,(size_t)local_rows*4,kunlun::device_to_device));
             check(kunlun::wait());
         }
-        for (int b=0;b<batch;++b) peer(main,(char *)dst->data+((size_t)b*n+remote_offset)*4,other,
+        for (int b=0;b<batch;++b) copy_peer(main,(char *)dst->data+((size_t)b*n+remote_offset)*4,other,
             (char *)ctx->split_y+(size_t)b*remote_rows*4,(size_t)remote_rows*4);
     }
+    if(row_overlap_enabled())for(int id:{main,other})kunlun::common_q4_complete(ctx->common[id]);
     ++split_matmuls;
+}
+
+bool row_gate_pair(backend_context * c,ggml_tensor * a,ggml_tensor * b,ggml_tensor * glu) {
+    const int main=c->id,other=1-main;auto * x=a->src[1];int k=x->ne[0];
+    auto * pa=(tensor_parts *)a->src[0]->extra,*pb=(tensor_parts *)b->src[0]->extra;
+    if(pa->rows[0]!=pb->rows[0] || pa->rows[1]!=pb->rows[1])return false;
+    activation_write(c,a);activation_write(c,b);activation_begin(c,a);auto & act=c->activation;
+    kunlun::CommonQ4ActivationLease temporary[2];uint64_t generation=act.use?act.generation:++c->row_generation;
+    size_t xs=(size_t)k*4;
+    if(c->split_x_size<xs){release(other,c->split_x,c->split_x_size);c->split_x=allocate(other,xs);c->split_x_size=xs;}
+    GGML_ASSERT(c->split_x);
+    bool staged=act.use && act.peer_generation==generation && act.peer_pointer==c->split_x && act.peer_extent==xs && activation_ready(c,other,k,1);
+    if(!staged)peer(other,c->split_x,main,x->data,xs);else{++act.peer_saved_calls;act.peer_saved_bytes+=xs;}
+    act.peer_generation=act.use?generation:0;act.peer_pointer=c->split_x;act.peer_extent=xs;
+    bool prepared=true,submitted[2]={};int padded[2]={};
+    for(int id:{main,other}) {
+        auto & lease=act.use?act.lease[id]:temporary[id];const void * input=id==main?x->data:c->split_x;
+        padded[id]=pa->common_weight[id]->info().np;size_t bytes=(size_t)2*padded[id]*4;
+        if(c->row_pair_size[id]<bytes){release(id,c->row_pair_output[id],c->row_pair_size[id]);c->row_pair_output[id]=allocate(id,bytes);c->row_pair_size[id]=bytes;}
+        GGML_ASSERT(c->row_pair_output[id]);
+        if(!lease.matches(id,k,1,kunlun::InputType::f32,generation))prepared=row_prepare(c,id,input,k,1,generation,lease) && prepared;
+    }
+    for(int id:{main,other})kunlun::common_q4_prepare_complete(c->common[id]);
+    if(prepared)for(int id:{main,other}) {
+        auto & lease=act.use?act.lease[id]:temporary[id];
+        submitted[id]=kunlun::common_q4_submit_pair_shared(c->common[id],id,c->row_pair_output[id],(float *)c->row_pair_output[id]+padded[id],*pa->common_weight[id],*pb->common_weight[id],lease,generation);
+    }
+    row_complete(c);
+    if(!submitted[main] || !submitted[other]){act.use=false;return false;}
+    if(glu) {
+        K200_DIAG_SCOPE(fused_diag,"op.swiglu","row-fused",glu->name);
+        const int gate_index=glu->src[0]==a?0:1;
+        for(int id:{main,other}) {
+            auto * base=(float *)c->row_pair_output[id];size_t extent=(size_t)padded[id]*4;
+            kunlun::SwiGLULayout p{pa->rows[id],1,padded[id]*4,padded[id]*4,padded[id]*4,kunlun::InputType::f32};
+            GGML_ASSERT(kunlun::swiglu_submit(c->row_glu[id],id,base,extent,base+gate_index*padded[id],extent,base+(1-gate_index)*padded[id],extent,p));
+        }
+        if(row_overlap_enabled()) { select(other);check(kunlun::wait()); }
+        else for(int id:{main,other}){select(id);check(kunlun::wait());}
+        activation_write(c,glu);kunlun::kv_max_invalidate(main,glu->data,ggml_nbytes(glu));
+        const int local_offset=main?pa->rows[0]:0,remote_offset=other?pa->rows[0]:0;
+        kunlun::copy_rows(c->gather,main,glu->data,c->row_pair_output[main],pa->rows[main],1,a->ne[0],local_offset);
+        kunlun::peer_completed(main,(float *)glu->data+remote_offset,other,c->row_pair_output[other],(size_t)pa->rows[other]*4);
+        ++c->row_glu_calls;
+    } else {
+        size_t bytes=(size_t)2*padded[other]*4;
+        if(c->peer_y_size<bytes){release(main,c->peer_y,c->peer_y_size);c->peer_y=allocate(main,bytes);c->peer_y_size=bytes;}
+        GGML_ASSERT(c->peer_y);kunlun::peer_completed(main,c->peer_y,other,c->row_pair_output[other],bytes);
+        kunlun::kv_max_invalidate(main,a->data,ggml_nbytes(a));kunlun::kv_max_invalidate(main,b->data,ggml_nbytes(b));
+        kunlun::row_pair_join(c->gather,main,a->data,b->data,c->row_pair_output[main],c->peer_y,pa->rows[main],pa->rows[other],padded[main],padded[other],main);
+    }
+    for(int id:{main,other}){common_paths[id][0]+=2;common_m[id][1]+=2;const char *phase=std::getenv("K200_PROFILE_PHASE");common_phase[id][phase?phase:"other"][0]+=2;}
+    if(act.enabled){activation_end(c,a);activation_end(c,b);}act.use=false;
+    ++c->row_pair_calls;split_matmuls+=2;return true;
 }
 
 #include "attention.inc"
@@ -636,6 +801,12 @@ bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
     const auto * a = t->src[0]; const auto * b = t->src[1];
     for (const auto * src : t->src) {
         if (src) {
+            const char * norm_mode=kunlun_default_on("GGML_KUNLUN_ROW_NORM");
+            auto * buffer=src->view_src ? src->view_src->buffer : src->buffer;
+            // Loader probes use a zero-sized buffer with no backend context.
+            if(norm_mode && !std::strcmp(norm_mode,"1") && t->op==GGML_OP_MUL &&
+               src->type==GGML_TYPE_F32 && ggml_is_vector(src) && std::strstr(src->name,"norm") &&
+               buffer && is_ours(buffer->buft) && ((type_context *)buffer->buft->context)->split)return false;
             auto * buf = buffer_of(src);
             if (buf && buf->type->split && (t->op != GGML_OP_MUL_MAT || (src != a && buf->size != 0))) return false;
         }
@@ -707,6 +878,8 @@ bool supports_op(ggml_backend_dev_t, const ggml_tensor * t) {
     return false;
 }
 
+#include "tp-executor.inc"
+
 ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
     auto * ctx = new backend_context{}; ctx->id = ((device_context *)dev->context)->id;
     ctx->activation.enabled=activation_share_enabled();
@@ -723,6 +896,9 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
         release(1-c->id,c->split_x,c->split_x_size); release(1-c->id,c->split_y,c->split_y_size);
         release(c->id,c->local_y,c->local_y_size);
         release(c->id,c->peer_y,c->peer_y_size);
+        for(int id=0;id<2;++id)release(id,c->row_pair_output[id],c->row_pair_size[id]);
+        std::fprintf(stderr,"KUNLUN row pair: calls=%zu fused_glu=%zu chunk_waves=%zu\n",c->row_pair_calls,c->row_glu_calls,c->row_chunk_waves);
+        std::fprintf(stderr,"KUNLUN row parallel: completed=%zu declined=%zu\n",c->row_parallel,c->row_declined);
         auto stats=kunlun::statistics();
         GGML_LOG_INFO("KUNLUN stats: pd0_mm=%zu pd1_mm=%zu split_mm=%zu p2p_copies=%zu p2p_bytes=%zu\n",stats.matmuls[0],stats.matmuls[1],split_matmuls.load(),stats.peer_copies,stats.peer_bytes);
         for (int id=0;id<2;++id) {
@@ -776,14 +952,15 @@ ggml_backend_t init_backend(ggml_backend_dev_t dev, const char *) {
     iface.graph_compute = [](ggml_backend_t b, ggml_cgraph * graph) {
         std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
         auto * c = (backend_context *)b->context;
+        K200_DIAG_SCOPE(backend_diag,"xpu.graph","kunlun","",0,c->id);
         ActivationGraphScope activation_scope(c,graph);
         GateUpGraphScope pair_scope(c,graph);
         for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
             auto * t = ggml_graph_node(graph,i);
             if(t->op==GGML_OP_GET_ROWS && !(t->flags & GGML_TENSOR_FLAG_COMPUTE))continue;
-            if(pair_scope.execute(t)){++i;continue;}
+            if(pair_scope.execute(t)){i+=pair_scope.extra_skip;continue;}
             if(c->activation.enabled)activation_write(c,t);
-            K200_DIAG_SCOPE(node_diag,"xpu.node",ggml_op_name(t->op),t->name);
+            K200_DIAG_SCOPE(node_diag,"xpu.node",ggml_op_name(t->op),t->name,0,c->id);
             kunlun::diagnostic_tensor(t->name,t->ne);
             if(t->op!=GGML_OP_NONE&&t->op!=GGML_OP_VIEW&&t->op!=GGML_OP_RESHAPE&&t->op!=GGML_OP_PERMUTE&&t->op!=GGML_OP_TRANSPOSE&&t->op!=GGML_OP_SET_ROWS)
                 kunlun::kv_max_invalidate(c->id,t->data,ggml_nbytes(t));
@@ -918,6 +1095,22 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
             delete c;
         };
         buffer_iface.set_tensor = [](ggml_backend_buffer_t b, ggml_tensor * t, const void * p, size_t o, size_t s) { transfer(b,t,const_cast<void *>(p),o,s,true); };
+        buffer_iface.set_tensor_2d = [](ggml_backend_buffer_t b,ggml_tensor * t,const void * data,size_t offset,size_t bytes,size_t count,size_t stride_tensor,size_t stride_data) {
+            std::lock_guard<std::recursive_mutex> lock(runtime_mutex);
+            auto * p=(t->type==GGML_TYPE_Q4_0 || t->type==GGML_TYPE_Q6_K)?(tensor_parts *)t->extra:nullptr;
+            const char * flag=std::getenv("GGML_KUNLUN_TP_FFN");
+            const bool tp_row = t->type == GGML_TYPE_Q4_0 &&
+                ((t->ne[0] == 4096 && (t->ne[1] == 2048 || t->ne[1] == 5504)) ||
+                 ((t->ne[0] == 2048 || t->ne[0] == 5504) && t->ne[1] == 4096));
+            const bool batch_upload = flag ? !std::strcmp(flag,"1") :
+                tp_row && bytes == ggml_row_size(t->type, t->ne[0]) && stride_tensor == bytes;
+            if(batch_upload && p && p->common && !t->view_src && count) {
+                GGML_ASSERT(offset<=p->original.size() && bytes<=p->original.size()-offset &&
+                    (!stride_tensor || count-1<=(p->original.size()-offset-bytes)/stride_tensor));
+                for(size_t i=0;i<count;++i)std::memcpy(p->original.data()+offset+i*stride_tensor,(const char *)data+i*stride_data,bytes);
+                size_t row=ggml_row_size(t->type,t->ne[0]);repack(p,offset/row,(offset+(count-1)*stride_tensor+bytes+row-1)/row);
+            } else for(size_t i=0;i<count;++i)transfer(b,t,(char *)data+i*stride_data,offset+i*stride_tensor,bytes,true);
+        };
         buffer_iface.get_tensor = [](ggml_backend_buffer_t b, const ggml_tensor * t, void * p, size_t o, size_t s) { transfer(b,t,p,o,s,false); };
         buffer_iface.memset_tensor = [](ggml_backend_buffer_t b, ggml_tensor * t, uint8_t v, size_t o, size_t s) { std::vector<char> data(s,v); transfer(b,t,data.data(),o,s,true); };
         buffer_iface.clear = [](ggml_backend_buffer_t b, uint8_t v) {
@@ -961,7 +1154,24 @@ ggml_backend_reg_t ggml_backend_kunlun_reg(void) {
         reg.iface.get_name=[](ggml_backend_reg_t) { return "KUNLUN"; };
         reg.iface.get_device_count=[](ggml_backend_reg_t) -> size_t { int n=0; return kunlun::device_count(&n)==0 ? std::min(n,2) : 0; };
         reg.iface.get_device=[](ggml_backend_reg_t, size_t i) { GGML_ASSERT(i<2); return &devices[i]; };
-        reg.iface.get_proc_address=[](ggml_backend_reg_t, const char * name) -> void * { return std::strcmp(name,"ggml_backend_split_buffer_type")==0 ? (void *)split_type : nullptr; };
+        reg.iface.get_proc_address=[](ggml_backend_reg_t, const char * name) -> void * {
+            if (!std::strcmp(name,"ggml_backend_split_buffer_type")) return (void *)split_type;
+            if (!std::strcmp(name,"ggml_backend_comm_init")) return (void *)tp_comm_init;
+            if (!std::strcmp(name,"ggml_backend_comm_free")) return (void *)tp_comm_free;
+            if (!std::strcmp(name,"ggml_backend_comm_allreduce_tensor")) return tp_ffn_enabled()?(void *)tp_allreduce_profile:(void *)tp_allreduce;
+            if (!std::strcmp(name,"ggml_backend_comm_allreduce_ready")) return (void *)tp_allreduce_ready;
+            if (!std::strcmp(name,"ggml_backend_meta_compute_group")) return tp_group_enabled() ? (void *)tp_compute_group : nullptr;
+            if (!std::strcmp(name,"ggml_backend_meta_use_child_probe")) return (void *)tp_use_child_probe;
+            if (!std::strcmp(name,"ggml_backend_kunlun_tp_quantization")) return (void *)tp_quantization;
+            if (!std::strcmp(name,"ggml_backend_kunlun_tp_quant_statistics")) return (void *)tp_quant_statistics;
+            if (!std::strcmp(name,"ggml_backend_kunlun_tp_weight_info")) return (void *)tp_weight_info;
+            if (!std::strcmp(name,"ggml_backend_kunlun_tp_weight_handle")) return (void *)tp_weight_handle;
+            if (!std::strcmp(name,"ggml_backend_kunlun_tp_common_statistics")) return (void *)tp_common_statistics;
+            if (!std::strcmp(name,"ggml_backend_kunlun_tp_profile")) return (void *)tp_profile_query;
+            if (!std::strcmp(name,"ggml_backend_kunlun_flash_inspection")) return (void *)tp_flash_inspection;
+            if (!std::strcmp(name,"ggml_backend_kunlun_tp_activation_statistics")) return (void *)tp_activation_statistics;
+            return nullptr;
+        };
         for(int i=0;i<2;++i) {
             devices[i]={di,&reg,&dc[i]}; normal_contexts[i]={i,false,1.0,dc[i].name};
             normal_types[i]={type_iface,&devices[i],&normal_contexts[i]};

@@ -154,6 +154,36 @@ int64_t llama_time_us(void) {
     return ggml_time_us();
 }
 
+// Limit the Kunlun path to the device order used by its two-PD executor.
+static bool llama_prepare_tensor_devices(llama_model * model, ggml_backend_dev_t * devs, size_t count) {
+    bool kunlun = false;
+    for (size_t i = 0; i < count; ++i) {
+        kunlun |= std::strncmp(ggml_backend_dev_name(devs[i]), "KUNLUN", 6) == 0;
+    }
+    if (kunlun) {
+        if (count != 2 || std::strcmp(ggml_backend_dev_name(devs[0]), "KUNLUN0") ||
+                          std::strcmp(ggml_backend_dev_name(devs[1]), "KUNLUN1")) {
+            LLAMA_LOG_ERROR("%s: use -dev KUNLUN0/KUNLUN1 for Kunlun Tensor Split\n", __func__);
+            return false;
+        }
+        for (const char * name : {"GGML_KUNLUN_TENSOR_PARALLEL", "GGML_KUNLUN_TP_FFN", "GGML_KUNLUN_TP_ATTENTION"}) {
+            const char * value = std::getenv(name);
+            if (value && std::strcmp(value, "1")) {
+                LLAMA_LOG_ERROR("%s: Kunlun Tensor Split requires %s=1\n", __func__, name);
+                return false;
+            }
+        }
+        const char * group = std::getenv("GGML_KUNLUN_TP_GROUP");
+        const char * quant = std::getenv("GGML_KUNLUN_TP_QUANT");
+        if ((group && !std::strcmp(group, "0")) || (quant && std::strcmp(quant, "global"))) {
+            LLAMA_LOG_ERROR("%s: Kunlun Tensor Split requires grouped execution and GLOBAL Q4 quantization\n", __func__);
+            return false;
+        }
+    }
+    model->get_split_state_ud = {count, model, kunlun};
+    return true;
+}
+
 // returns true on success
 static bool llama_prepare_model_devices(const llama_model_params & params, llama_model * model) {
     // create list of devices to use with this model
@@ -171,8 +201,9 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
             for (size_t i = 0; i < n_devs; ++i) {
                 LLAMA_LOG_INFO("%s: - device %zu: %s\n", __func__, i, ggml_backend_dev_name(params.devices[i]));
             }
-            model->get_split_state_ud.n_devices = n_devs;
-            model->get_split_state_ud.model = model;
+            if (!llama_prepare_tensor_devices(model, params.devices, n_devs)) {
+                return false;
+            }
             model->devices.push_back({
                 true, ggml_backend_meta_device(
                 params.devices, n_devs, llama_meta_device_get_split_state, &model->get_split_state_ud)
@@ -212,8 +243,9 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
             }
 
             GGML_ASSERT(!devs.empty());
-            model->get_split_state_ud.n_devices = devs.size();
-            model->get_split_state_ud.model     = model;
+            if (!llama_prepare_tensor_devices(model, devs.data(), devs.size())) {
+                return false;
+            }
             gpus.push_back({
                 true, ggml_backend_meta_device(
                 devs.data(), devs.size(), llama_meta_device_get_split_state, &model->get_split_state_ud)

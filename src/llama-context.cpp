@@ -1,4 +1,5 @@
 #include "llama-context.h"
+#include "../ggml/src/k200-diag.h"
 
 #include "ggml.h"
 #include "llama-arch.h"
@@ -1518,7 +1519,14 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
+    const char * timing = model.get_split_state_ud.kunlun ? std::getenv("GGML_KUNLUN_GRAPH_TIMING") : nullptr;
+    const bool graph_timing = timing && std::strcmp(timing, "1") == 0;
     if (!graph_reuse_disable && gf_res_prev_active == res && res->can_reuse(gparams)) {
+        if (graph_timing) {
+            const auto * mask = ggml_graph_get_tensor(gf, "attn_inp_kq_mask");
+            LLAMA_LOG_INFO("META_GRAPH reused=1 M=%u outputs=%lld kv=%lld\n",
+                    ubatch.n_tokens, (long long) n_outputs, (long long) (mask ? mask->ne[0] : 0));
+        }
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
@@ -1538,7 +1546,14 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         //const auto t_start_us = ggml_time_us();
 
+        const int64_t build_start = graph_timing ? ggml_time_us() : 0;
         gf = model.build_graph(gparams);
+        if (graph_timing) {
+            const int64_t build_us = ggml_time_us() - build_start;
+            const auto * mask = gf ? ggml_graph_get_tensor(gf, "attn_inp_kq_mask") : nullptr;
+            LLAMA_LOG_INFO("META_GRAPH reused=0 M=%u outputs=%lld kv=%lld build_us=%lld\n",
+                    ubatch.n_tokens, (long long) n_outputs, (long long) (mask ? mask->ne[0] : 0), (long long) build_us);
+        }
 
         //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
 
@@ -1548,12 +1563,36 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
+        // This inference graph returns raw logits to the host. Keep other outputs and samplers mirrored.
+        auto * logits_tensor = res->get_logits();
+        if (model.get_split_state_ud.kunlun && gtype == LLM_GRAPH_TYPE_DEFAULT && sampling.samplers.empty() &&
+            !cparams.embeddings && !cparams.embeddings_nextn && model.output && model.output->type == GGML_TYPE_Q6_K &&
+            logits_tensor && logits_tensor->op == GGML_OP_MUL_MAT && logits_tensor->src[0] == model.output) {
+            const char * flag = std::getenv("GGML_KUNLUN_TP_OUTPUT_PD0");
+            if (!flag || std::strcmp(flag,"1") == 0) ggml_backend_meta_mark_first_output(gf, logits_tensor);
+        }
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
         }
 
+        if (model.get_split_state_ud.kunlun) {
+            for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+                auto * node = ggml_graph_node(gf, i);
+                auto * backend = ggml_backend_sched_get_tensor_backend(sched.get(), node);
+                if (node->op != GGML_OP_NONE && (!backend || ggml_backend_get_device(backend) != model.devices.front().dev)) {
+                    LLAMA_LOG_ERROR("%s: Kunlun Tensor Split rejects non-Meta operation %s (%s)\n",
+                            __func__, node->name, ggml_op_name(node->op));
+                    ret = GGML_STATUS_FAILED;
+                    return nullptr;
+                }
+            }
+            if (std::getenv("GGML_KUNLUN_CONTEXT_TRACE")) {
+                LLAMA_LOG_INFO("%s: Kunlun Tensor Split M=%u nodes=%d splits=%d CPU ops=0\n",
+                        __func__, ubatch.n_tokens, ggml_graph_n_nodes(gf), ggml_backend_sched_get_n_splits(sched.get()));
+            }
+        }
         gf_res_prev_active = res;
     }
 
@@ -1567,7 +1606,14 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
-    const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    const auto status = [&] {
+#ifdef K200_COMPUTE_HOOKS
+        const auto * mask = k200_diag_event ? ggml_graph_get_tensor(gf, "attn_inp_kq_mask") : nullptr;
+        const uint64_t shape = (uint64_t(mask ? mask->ne[0] : 0) << 32) | uint32_t(n_outputs);
+        K200_DIAG_SCOPE(compute_diag,"llama.compute",ubatch.n_tokens>1?"PP":"TG","",shape);
+#endif
+        return graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    }();
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -1819,6 +1865,18 @@ static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_s
 }
 
 int llama_context::decode(const llama_batch_ext & batch_inp) {
+    if (model.get_split_state_ud.kunlun) {
+        for (const auto & token : batch_inp.tokens) {
+            if (token.has_embd || token.has_state || token.seq_ids.size() != 1 || *token.seq_ids.begin() != 0) {
+                LLAMA_LOG_ERROR("%s: Kunlun Tensor Split requires token input for sequence 0\n", __func__);
+                return -1;
+            }
+        }
+        if (!cparams.causal_attn || !loras->empty()) {
+            LLAMA_LOG_ERROR("%s: Kunlun Tensor Split requires causal attention without adapters\n", __func__);
+            return -1;
+        }
+    }
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
         return encode(batch_inp);
@@ -3515,6 +3573,9 @@ bool llama_context::state_load_file(const char * filepath, llama_token * tokens_
 }
 
 bool llama_context::state_save_file(const char * filepath, const llama_token * tokens, size_t n_token_count) {
+    if (model.get_split_state_ud.kunlun) {
+        throw std::runtime_error("Kunlun Tensor Split KV state export is unsupported");
+    }
     llama_file file(filepath, "wb");
 
     file.write_u32(LLAMA_SESSION_MAGIC);
@@ -3586,6 +3647,9 @@ size_t llama_context::state_seq_load_file(llama_seq_id seq_id, const char * file
 }
 
 size_t llama_context::state_seq_save_file(llama_seq_id seq_id, const char * filepath, const llama_token * tokens, size_t n_token_count) {
+    if (model.get_split_state_ud.kunlun) {
+        throw std::runtime_error("Kunlun Tensor Split KV state export is unsupported");
+    }
     llama_file file(filepath, "wb");
 
     file.write_u32(LLAMA_STATE_SEQ_MAGIC);
@@ -4052,6 +4116,19 @@ llama_context * llama_init_from_model(
         }
         if (model->get_split_state_ud.n_devices == 1) {
             LLAMA_LOG_WARN("%s: SPLIT_MODE_TENSOR being used for a single device is not recommended\n", __func__);
+        }
+    }
+
+    if (model->get_split_state_ud.kunlun) {
+        if (params.n_ctx == 0) {
+            params.n_ctx = 1024;
+        }
+        if (params.n_ctx > 1024 || params.n_seq_max != 1 || !params.offload_kqv ||
+            params.type_k != GGML_TYPE_F16 || params.type_v != GGML_TYPE_F16 ||
+            (params.n_ubatch != 1 && params.n_ubatch != 128) || params.n_batch < params.n_ubatch ||
+            params.embeddings) {
+            LLAMA_LOG_ERROR("%s: Kunlun Tensor Split requires one sequence, F16 KV on device, context <= 1024 and ubatch 1 or 128\n", __func__);
+            return nullptr;
         }
     }
 

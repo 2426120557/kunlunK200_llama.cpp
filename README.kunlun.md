@@ -51,3 +51,5 @@ GGML_KUNLUN_PRUNE_INACTIVE_MIXED=1 omits inactive mixed-input branches in suppor
 ## Current recommended defaults
 
 See [DEFAULTS.md](DEFAULTS.md). Common Q4, new SDNN Q6, Q4/F32 GET_ROWS and pure-token graph specialization are enabled when unset. Large PP remains disabled. Explicit 0 preserves rollback. This table supersedes dated opt-in reports.
+
+The [production defaults and Tensor Split prerequisites](ggml/src/ggml-kunlun/TENSOR-DEFAULTS.md) describe the two-PD paths and environment overrides.

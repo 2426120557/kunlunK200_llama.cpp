@@ -211,6 +211,10 @@ extern "C" {
     typedef void   (*ggml_backend_comm_free_t)(void * comm_ctx);
     typedef bool   (*ggml_backend_comm_allreduce_tensor_t)(void * comm_ctx, struct ggml_tensor ** tensors);
 
+    // Optional collective called immediately after a successful, synchronous group compute.
+    // The tensors and all earlier work in the group are complete when the hook is entered.
+    typedef bool (*ggml_backend_comm_allreduce_ready_t)(void * comm_ctx, struct ggml_tensor ** tensors);
+
     // Split buffer type for tensor parallelism (old)
     typedef ggml_backend_buffer_type_t   (*ggml_backend_split_buffer_type_t)(int main_device, const float * tensor_split);
     // Set the number of threads for the backend
@@ -420,6 +424,23 @@ extern "C" {
         uint32_t nr[16];
         uint32_t n_segments;
     };
+
+    // Borrowed metadata. A group hook must complete all work before returning.
+    struct ggml_backend_meta_node_descriptor {
+        const struct ggml_tensor * logical;
+        struct ggml_tensor * const * children;
+        const struct ggml_backend_meta_split_state * split_state;
+    };
+    typedef enum ggml_status (*ggml_backend_meta_compute_group_t)(void * comm_ctx,
+        struct ggml_cgraph ** graphs, const struct ggml_backend_meta_node_descriptor * nodes,
+        size_t n_nodes, uint64_t graph_generation);
+    typedef bool (*ggml_backend_meta_use_child_probe_t)(ggml_backend_dev_t dev);
+    // Mark a host-read terminal matmul output before graph allocation. Returns false for a graph consumer.
+    GGML_API bool ggml_backend_meta_mark_first_output(const struct ggml_cgraph * graph, struct ggml_tensor * tensor);
+    // Read-only introspection; NULL/false for a tensor without initialized Meta children.
+    GGML_API struct ggml_tensor * ggml_backend_meta_tensor_child(const struct ggml_tensor * tensor, size_t index);
+    GGML_API bool ggml_backend_meta_tensor_split_state(const struct ggml_tensor * tensor, bool assume_sync,
+        struct ggml_backend_meta_split_state * state);
 
     // function to assign split states for statically allocated tensors, compute tensor split states will be assigned to be compatible:
     typedef struct ggml_backend_meta_split_state(*ggml_backend_meta_get_split_state_t)(const struct ggml_tensor * tensor, void * userdata);

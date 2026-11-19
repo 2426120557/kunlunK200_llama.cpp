@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -1241,6 +1242,12 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
 
     graph->uid = ggml_graph_next_uid();
 
+    // The placement passes leave the logical tensor DAG intact. Drop the temporary
+    // child arena before the split pass can rewrite source edges for copies.
+    const bool has_meta = std::any_of(sched->backends, sched->backends + sched->n_backends, ggml_backend_is_meta);
+    std::unique_ptr<ggml_backend_meta_probe_scope, decltype(&ggml_backend_meta_probe_end)> probe(
+            has_meta ? ggml_backend_meta_probe_begin(sched->backends, sched->n_backends) : nullptr, ggml_backend_meta_probe_end);
+
     // pass 1: assign backends to ops with pre-allocated inputs
     for (int i = 0; i < graph->n_leafs; i++) {
         struct ggml_tensor * leaf = graph->leafs[i];
@@ -1450,6 +1457,8 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         }
         GGML_ASSERT(*cur_backend_id != -1);
     }
+
+    probe.reset();
 
     // pass 5: split graph, find tensors that need to be copied
     {
@@ -1911,6 +1920,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
         }
 
+        // A callback can inspect intermediate values from this split.
+        if (sched->callback_eval) {
+            for (int node = 0; node < split->graph.n_nodes; ++node) {
+                split->graph.nodes[node]->flags |= GGML_TENSOR_FLAG_NO_FUSION;
+            }
+        }
         if (!sched->callback_eval) {
             enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
             if (ec != GGML_STATUS_SUCCESS) {
@@ -2113,10 +2128,19 @@ bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgra
     sched->cur_copy = sched->next_copy;
     sched->next_copy = (sched->next_copy + 1) % sched->n_copies;
 
+    const char * trace = ggml_backend_is_meta(sched->backends[0]) ? getenv("GGML_KUNLUN_GRAPH_TIMING") : nullptr;
+    const bool timing = trace && strcmp(trace, "1") == 0;
+    const int64_t start = timing ? ggml_time_us() : 0;
     ggml_backend_sched_split_graph(sched, graph);
+    const int64_t split_done = timing ? ggml_time_us() : 0;
 
     if (!ggml_backend_sched_alloc_splits(sched)) {
         return false;
+    }
+    if (timing) {
+        GGML_LOG_INFO("META_SCHED split_us=%lld bind_us=%lld nodes=%d splits=%d\n",
+                (long long) (split_done - start), (long long) (ggml_time_us() - split_done),
+                graph->n_nodes, sched->n_splits);
     }
 
     sched->is_alloc = true;

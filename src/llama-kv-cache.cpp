@@ -471,6 +471,10 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 }
 
 void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
+    if (model.get_split_state_ud.kunlun && seq_id_src != seq_id_dst) {
+        LLAMA_LOG_ERROR("%s: KV sequence copy is unsupported with Kunlun Tensor Split\n", __func__);
+        return;
+    }
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;
@@ -590,6 +594,10 @@ void llama_kv_cache::seq_keep(llama_seq_id seq_id) {
 }
 
 void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
+    if (model.get_split_state_ud.kunlun && shift != 0) {
+        LLAMA_LOG_ERROR("%s: KV shift is unsupported with Kunlun Tensor Split\n", __func__);
+        return;
+    }
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;
@@ -640,6 +648,10 @@ void llama_kv_cache::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, ll
 }
 
 void llama_kv_cache::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
+    if (model.get_split_state_ud.kunlun && d != 1) {
+        LLAMA_LOG_ERROR("%s: KV position division is unsupported with Kunlun Tensor Split\n", __func__);
+        return;
+    }
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;
@@ -730,7 +742,10 @@ llama_memory_context_ptr llama_kv_cache::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : embd_all ? balloc.split_seq(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            // The cooperative Kunlun kernels accept 128-row PP and single-token decode.
+            const uint32_t remaining = balloc.get_n_tokens() - balloc.get_n_used();
+            const uint32_t limit = model.get_split_state_ud.kunlun && remaining < 128 ? 1 : n_ubatch;
+            auto ubatch = n_stream == 1 ? balloc.split_simple(limit) : embd_all ? balloc.split_seq(limit) : balloc.split_equal(limit, true, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -1208,6 +1223,9 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 }
 
 bool llama_kv_cache::get_can_shift() const {
+    if (model.get_split_state_ud.kunlun) {
+        return false;
+    }
     // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
     if (model.arch == LLM_ARCH_STEP35) {
         return false;
@@ -2071,6 +2089,9 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
 }
 
 void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+    if (model.get_split_state_ud.kunlun) {
+        throw std::runtime_error("Kunlun Tensor Split KV state export is unsupported");
+    }
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;
@@ -2152,6 +2173,9 @@ void llama_kv_cache::state_read_sinfo(
   llama_state_seq_flags   flags,
       slot_info_vec_t *   sinfos_out,
 const slot_info_vec_t *   sinfos_in) {
+    if (model.get_split_state_ud.kunlun) {
+        throw std::runtime_error("Kunlun Tensor Split KV state import is unsupported");
+    }
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return;

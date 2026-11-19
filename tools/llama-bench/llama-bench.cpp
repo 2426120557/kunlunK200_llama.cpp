@@ -2506,6 +2506,10 @@ int llama_bench(int argc, char ** argv) {
                 }
             }
 
+#ifdef K200_COMPUTE_HOOKS
+            extern void compute_profile_phase(int);
+            compute_profile_phase(t.n_prompt > 0 ? 1 : 2);
+#endif
             uint64_t t_start = get_time_ns(), pp_end = t_start;
 
             if (t.n_prompt > 0) {
@@ -2537,6 +2541,9 @@ int llama_bench(int argc, char ** argv) {
             }
 
             uint64_t t_ns = get_time_ns() - t_start;
+#ifdef K200_COMPUTE_HOOKS
+            compute_profile_phase(0);
+#endif
             t.samples_ns.push_back(t_ns);
             if (split_timing) std::fprintf(stderr,"BENCH_SPLIT trial=%d pp=%d tg=%d pp_ns=%llu tg_ns=%llu total_ns=%llu kv_end=%lld\n",i,t.n_prompt,t.n_gen,(unsigned long long)(t.n_prompt?pp_end-t_start:0),(unsigned long long)(t.n_gen?t_ns-(pp_end-t_start):0),(unsigned long long)t_ns,(long long)llama_memory_seq_pos_max(llama_get_memory(ctx),0));
             if (paired_sequence && *paired_sequence)std::fprintf(stderr,"K200PAIR phase=%s trial=%d variable=%s mode=%c ns=%llu\n",
@@ -2576,3 +2583,10 @@ int llama_bench(int argc, char ** argv) {
 
     return 0;
 }
+
+#ifdef K200_COMPUTE_HOOKS
+extern "C" __attribute__((weak)) void k200_compute_phase(int);
+void compute_profile_phase(int phase) {
+    if (k200_compute_phase) k200_compute_phase(phase);
+}
+#endif

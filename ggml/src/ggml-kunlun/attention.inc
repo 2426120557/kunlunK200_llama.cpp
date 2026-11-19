@@ -2,7 +2,7 @@ bool large_pp_enabled() {
     const char *mode=std::getenv("KUNLUN_LARGE_PP");return mode && !std::strcmp(mode,"1");
 }
 bool attention_enabled() {
-    const char *mode=std::getenv("GGML_KUNLUN_ATTENTION");return mode && (!std::strcmp(mode,"1") || !std::strcmp(mode,"tg"));
+    const char *mode=kunlun_default_on("GGML_KUNLUN_ATTENTION");return mode && (!std::strcmp(mode,"1") || !std::strcmp(mode,"tg"));
 }
 bool attention_rope_enabled() {
     const char *mode=std::getenv("GGML_KUNLUN_ROPE");return attention_enabled() && (!mode || !std::strcmp(mode,"1"));
@@ -25,7 +25,7 @@ bool attention_layout(const ggml_tensor *t,kunlun::Tensor4Layout &p) {
     return !*kunlun::tensor4_reason(p);
 }
 bool flash_enabled() {
-    const char *mode=std::getenv("GGML_KUNLUN_FLASH");return attention_enabled() && mode && !std::strcmp(mode,"1");
+    const char *mode=kunlun_default_on("GGML_KUNLUN_FLASH");return attention_enabled() && mode && !std::strcmp(mode,"1");
 }
 const char * flash_parameters(const ggml_tensor *t,kunlun::Flash4Layout &p) {
     if(!flash_enabled())return "flash disabled";
@@ -78,7 +78,7 @@ const char * attention_reason(const ggml_tensor *t) {
         t->op==GGML_OP_ROPE?t->ne[2]:t->op==GGML_OP_SOFT_MAX?t->ne[1]:ggml_nrows(t);
     if(queries>256 && !(large_pp_enabled() && flash_enabled() &&
         (t->op==GGML_OP_ROPE || t->op==GGML_OP_CONT)))return "query count exceeds Attention chain limit";
-    if(!std::strcmp(std::getenv("GGML_KUNLUN_ATTENTION"),"tg") && queries>1)
+    if(!std::strcmp(kunlun_default_on("GGML_KUNLUN_ATTENTION"),"tg") && queries>1)
         return "PP CPU policy";
     if(t->op==GGML_OP_MUL_MAT){kunlun::Matmul4Layout p{};return attention_parameters(t,p);}
     if(t->op==GGML_OP_SOFT_MAX){kunlun::Softmax4Layout p{};return attention_parameters(t,p);}
