@@ -1,4 +1,4 @@
-# Kunlun K200 runtime defaults (0.7.13)
+# Kunlun K200 runtime defaults (0.7.14)
 
 The split mode is still explicit. With `-sm tensor -dev KUNLUN0/KUNLUN1`,
 the K200 backend uses the guarded two-PD executor by default for the validated
@@ -28,5 +28,10 @@ all-reduce implementation. The fast copies still require the supported K200
 and XRE/driver versions. `KUNLUN_LARGE_PP=1` retains its experimental scope.
 
 Build with the pinned `vendor/KunlunK200` submodule or point
-`KUNLUN_USE_SYSTEM_LIBRARY=ON` at a compatible 0.7.13 installation.
+`KUNLUN_USE_SYSTEM_LIBRARY=ON` at a compatible 0.7.14 installation.
 `GGML_KUNLUN_TP_TESTS=ON` enables the optional hardware validation executables.
+
+For M=1, the Gate/Up Pair can reduce both local FP32 partial sums and run
+SwiGLU in one CL kernel. Set `GGML_KUNLUN_TP_PAIR_SUM_GLU=0` to use separate
+kernels. The existing Pair, Gate/Up SwiGLU and fast Pair SUM guards still apply.
+M=128 and graph-observable intermediates keep their original execution paths.

@@ -62,10 +62,31 @@ bool tp_gate_glu_execute(TPGroupExecutor * g,ggml_cgraph ** graphs,
     if (rows==1 && (!pair_flag || std::strcmp(pair_flag,"1")!=0)) return false;
     const size_t bytes=(size_t)rows*physical*sizeof(float);
     void * padded[2][2]{};
+    bool fused_post=false;
     {
     K200_DIAG_SCOPE(gate_scope,"tp.node","MUL_MAT",mm[0][0]->src[0]->name);
     if (!tp_prepare_inputs(g,mm[0])) return false;
     const auto begin=tp_now();
+    const char * post=kunlun_default_on("GGML_KUNLUN_TP_PAIR_SUM_GLU");
+    const int observable=GGML_TENSOR_FLAG_OUTPUT | GGML_TENSOR_FLAG_NO_FUSION;
+    if (rows==1 && post && std::strcmp(post,"1")==0 &&
+            !((desc[i].logical->flags | desc[i+1].logical->flags) & observable)) {
+        bool submitted[2]{};
+        for (int d=0;d<2;++d) {
+            K200_DIAG_SCOPE(submit_diag,"tp.stage","submit-pair-sum-glu",mm[0][0]->src[0]->name,0,d);
+            auto * out=glu[d];
+            select(d);
+            kunlun::kv_max_invalidate(d,out->data,ggml_nbytes(out));
+            submitted[d]=g->pending[d]=kunlun::common_q4_tp_submit_pair_glu(g->contexts[d]->common[d],d,
+                    out->data,ggml_nbytes(out),swap[d],*weights[0][d],*weights[1][d],g->leases[d],g->invocation);
+        }
+        tp_q4_finish(g);
+        fused_post=submitted[0] && submitted[1] &&
+            kunlun::common_q4_pair_last_status(g->contexts[0]->common[0])==kunlun::CommonQ4PairStatus::Success &&
+            kunlun::common_q4_pair_last_status(g->contexts[1]->common[1])==kunlun::CommonQ4PairStatus::Success;
+        if (fused_post) ++g->gate_glu_fused_calls;
+    }
+    if (!fused_post) {
     for (int d=0;d<2;++d) {
         auto & buf=g->gate_up[d];
         if (!buf || buf->size()<2*bytes) buf.reset(new kunlun::Buffer(d,2*bytes));
@@ -88,9 +109,10 @@ bool tp_gate_glu_execute(TPGroupExecutor * g,ggml_cgraph ** graphs,
         tp_q4_finish(g);
         if (!ok) return false; // Only private scratch has been written.
     }
+    }
     tp_record(g,TP_GATE,begin);
     }
-    {
+    if (!fused_post) {
         K200_DIAG_SCOPE(glu_scope,"tp.node","GLU",glu[0]->name);
         const auto start=tp_now();
         bool ok=true;

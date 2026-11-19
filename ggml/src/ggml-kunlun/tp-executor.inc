@@ -81,7 +81,7 @@ struct TPGroupExecutor {
     std::unique_ptr<kunlun::Buffer> receive;
     int sum_sync_supported = -1;
     std::unique_ptr<kunlun::Buffer> gate_up[2];
-    size_t gate_glu_calls[2]={};
+    size_t gate_glu_calls[2]={}, gate_glu_fused_calls=0;
     kunlun::CommonQ4ActivationLease leases[2];
     const ggml_tensor * inputs[2]={};
     uint64_t invocation=0;
@@ -139,7 +139,8 @@ void tp_comm_free(void * opaque) {
     if (g->preflight_misses) GGML_LOG_INFO("KUNLUN TP preflight cache: hits=%zu misses=%zu rebuilds=%zu peak_bytes=%zu\n",
         g->preflight_hits,g->preflight_misses,g->preflight_rebuilds,g->preflight_peak_bytes);
     if (g->gate_glu_calls[0] || g->gate_glu_calls[1]) {
-        GGML_LOG_INFO("KUNLUN TP Gate/Up SwiGLU: M1=%zu M128=%zu\n",g->gate_glu_calls[0],g->gate_glu_calls[1]);
+        GGML_LOG_INFO("KUNLUN TP Gate/Up SwiGLU: M1=%zu M128=%zu fused_sum_glu=%zu\n",
+            g->gate_glu_calls[0],g->gate_glu_calls[1],g->gate_glu_fused_calls);
     }
     delete g;
 }
